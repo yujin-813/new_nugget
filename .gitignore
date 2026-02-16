@@ -1,0 +1,34 @@
+# virtualenv
+.venv/
+env/
+venv/
+
+# python
+__pycache__/
+*.pyc
+
+# mac
+.DS_Store
+
+# secrets
+client_secret.json
+service_account.json
+.env
+
+# db
+*.db
+
+# model
+*.pkl
+
+# uploads
+uploads/
+uploaded_files/
+venv/
+__pycache__/
+*.pyc
+.DS_Store
+.env
+.idea/
+.vscode/
+
