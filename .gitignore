@@ -1,34 +1,52 @@
-# virtualenv
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+*.so
+.Python
+
+# Virtual Environment
 .venv/
 env/
 venv/
+ENV/
 
-# python
-__pycache__/
-*.pyc
-
-# mac
-.DS_Store
-
-# secrets
-client_secret.json
-service_account.json
-.env
-
-# db
-*.db
-
-# model
-*.pkl
-
-# uploads
-uploads/
-uploaded_files/
-venv/
-__pycache__/
-*.pyc
-.DS_Store
-.env
+# IDE
 .idea/
 .vscode/
+*.swp
+*.swo
 
+# OS
+.DS_Store
+Thumbs.db
+
+# Credentials & Secrets (CRITICAL - DO NOT COMMIT)
+service_account.json
+client_secret.json
+credentials.json
+.env
+.env.local
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs
+*.log
+logs/
+
+# Model files
+*.pkl
+
+# Uploads
+uploads/
+uploaded_files/
+
+# Flask session
+flask_session/
+
+# Cache
+.cache/

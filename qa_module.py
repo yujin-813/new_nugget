@@ -10,7 +10,7 @@ import hashlib
 import difflib
 import uuid
 from dotenv import load_dotenv
-
+import copy
 def generate_unique_id():
     return str(uuid.uuid4())
 
@@ -21,7 +21,7 @@ from google.analytics.data_v1beta.types import GetMetadataRequest
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 
-from ga4_metadata import GA4_DIMENSIONS, GA4_METRICS,GA4_ADS_DIMENSIONS
+
 from db_manager import DBManager, DB_PATH
 from file_engine import file_engine
 from mixed_engine import MixedAnalysisEngine
@@ -34,7 +34,10 @@ from insight_presenter import present_structured_insight, present_raw_data
 
 from relation_classifier import classify_relation
 from state_policy import apply_relation_policy
-
+from ga4_metadata import (
+    GA4_DIMENSIONS, GA4_METRICS, GA4_ADS_DIMENSIONS,
+    DEFAULT_METRIC, DEFAULT_TIME_DIMENSION, DEFAULT_DIMENSION
+)
 
 def format_value(v):
     try:
@@ -64,7 +67,7 @@ UPLOAD_FOLDER = 'uploaded_files'
 from sqlalchemy import create_engine
 
 class FallbackChatHistory:
-    """
+    """ 
     LangChain SQLChatMessageHistory가 깨질 경우를 대비한 안전 fallback.
     시스템이 죽지 않게 최소한의 add_user_message / add_ai_message만 제공.
     """
@@ -266,11 +269,6 @@ class GA4AnalysisEngine:
             if intent == "breakdown":
                 logging.info("[Fix] Breakdown detected → reset dimensions")
                 final_state["dimensions"] = delta.get("dimensions", [])
-
-            # 🔥 TopN + 상품 관련이면 itemName 강제
-            if delta.get("limit") and any("item" in m["name"] for m in delta.get("metrics", [])):
-                logging.info("[Fix] TopN + Item metric → force itemName dimension")
-                final_state["dimensions"] = [{"name": "itemName"}]
 
             
             
@@ -599,41 +597,106 @@ class GA4AnalysisEngine:
 
         return scope_groups
 
-    def _execute_multi_scope_queries(self, property_id, final_state, scope_groups):
+    CATEGORY_TO_SCOPE = {
+        "ecommerce": "item",
+        "time": "event",
+        "event": "event",
+        "page": "event",
+        "device": "event",
+        "geo": "event",
+        "traffic": "event",
+        "user": "event",
+        "ads": "event",
+    }
 
+    def _filter_dimensions_by_scope(self, dimensions, target_scope):
+        filtered = []
+        for d in dimensions:
+            meta = GA4_DIMENSIONS.get(d["name"], {})
+            cat = meta.get("category")
+            dim_scope = meta.get("scope") or self.CATEGORY_TO_SCOPE.get(cat, "event")
+
+            if dim_scope == target_scope:
+                filtered.append(d)
+        return filtered
+
+
+    def _get_default_dimension_for_scope(self, scope):
+        candidates = []
+
+        for dim_name, meta in GA4_DIMENSIONS.items():
+            cat = meta.get("category")
+            dim_scope = meta.get("scope") or self.CATEGORY_TO_SCOPE.get(cat, "event")
+
+            if dim_scope == scope:
+                candidates.append(dim_name)
+
+        # 우선순위 규칙 (하드코딩된 지표명 X, dimension 정책만)
+        def _get_default_dimension_for_scope(self, scope):
+            candidates = []
+
+            for dim_name, meta in GA4_DIMENSIONS.items():
+                cat = meta.get("category")
+                dim_scope = meta.get("scope") or self.CATEGORY_TO_SCOPE.get(cat, "event")
+
+                if dim_scope == scope and meta.get("category") != "time":
+                    candidates.append((dim_name, meta.get("priority", 0)))
+
+            candidates.sort(key=lambda x: x[1], reverse=True)
+
+            return [{"name": candidates[0][0]}] if candidates else []
+
+
+        if scope in preferred:
+            for p in preferred[scope]:
+                if p in candidates:
+                    return [{"name": p}]
+
+        return [{"name": candidates[0]}] if candidates else []
+
+
+    def _execute_multi_scope_queries(self, property_id, final_state, scope_groups):
         blocks = []
 
+        original_group_by = final_state.get("analysis_plan", {}).get("group_by", [])
+
         for scope, metrics in scope_groups.items():
-
-            sub_state = final_state.copy()
-
-            # 🔥 metrics 교체
+            sub_state = copy.deepcopy(final_state)
             sub_state["metrics"] = metrics
 
-            # 🔥 analysis_plan도 scope별로 재설정
             sub_plan = sub_state.get("analysis_plan", {}).copy()
             sub_plan["metrics"] = metrics
+
+            scoped_group_by = self._filter_dimensions_by_scope(original_group_by, scope)
+
+            if scope == "item":
+                if not scoped_group_by:
+                    scoped_group_by = [{"name": "itemName"}]
+
+            sub_state["dimensions"] = scoped_group_by
+            sub_plan["group_by"] = scoped_group_by
             sub_state["analysis_plan"] = sub_plan
 
-            # 🔥 scope별 dimension 처리
-            if scope == "item":
-                sub_state["dimensions"] = [{"name": "itemName"}]
-            else:
-                sub_state["dimensions"] = final_state.get("dimensions") or [{"name": "date"}]
-
             df, start_date, end_date = self._run_ga4_query(property_id, sub_state)
-            logging.info(f"[MultiScope:{scope}] df.columns = {df.columns.tolist()}")
-            logging.info(f"[MultiScope:{scope}] df.head() = {df.head(3).to_dict(orient='records')}")
-            logging.info(f"[MultiScope:{scope}] dtypes = {df.dtypes}")
             if df.empty:
                 continue
 
             if scope == "event":
                 total_values = {}
+
+                # 🔥 event scope는 항상 dimension 제거 후 단일 total 쿼리
+                total_state = copy.deepcopy(sub_state)
+                total_state["dimensions"] = []
+                total_state["analysis_plan"]["group_by"] = []
+
+                total_df, _, _ = self._run_ga4_query(property_id, total_state)
+
                 for m in metrics:
                     key = m["name"]
-                    if key in df.columns:
-                        total_values[key] = format_value(float(df[key].sum()))
+                    if key in total_df.columns:
+                        val = pd.to_numeric(total_df[key], errors="coerce").sum()
+                        if pd.notnull(val):
+                            total_values[key] = format_value(float(val))
 
                 blocks.append({
                     "title": "전체 지표 요약",
@@ -641,8 +704,8 @@ class GA4AnalysisEngine:
                     "data": total_values
                 })
 
-            elif scope == "item":
 
+            elif scope == "item":
                 raw = df.where(pd.notnull(df), None).to_dict(orient="records")
                 raw = present_raw_data(raw)
 
@@ -673,19 +736,32 @@ class GA4AnalysisEngine:
             logging.warning(f"[Safety] analysis_plan corrupted: {type(plan)} → resetting to empty dict")
             plan = {}
 
-        metrics = plan.get("metrics") or state.get("metrics", [{"name": "activeUsers"}])
+        
 
-        dimensions = state.get("dimensions") or [{"name": "date"}]
+        metrics = plan.get("metrics") or state.get("metrics") or [{"name": DEFAULT_METRIC}]
+        dimensions = state.get("dimensions")
+
+        if not dimensions:
+            group_by = state.get("analysis_plan", {}).get("group_by", [])
+            if group_by:
+                dimensions = group_by
+            else:
+                dimensions = ([{"name": DEFAULT_TIME_DIMENSION}] if DEFAULT_TIME_DIMENSION else [])
+
+
         periods = state.get("periods", [])
         
         if not periods:
             periods = [{"label": "current", "start_date": state.get("start_date"), "end_date": state.get("end_date")}]
         
         # Comparison logic: Remove time dims if not trend
-        plan = state.get("analysis_plan", {})
+        plan = state.get("analysis_plan")
+        if not isinstance(plan, dict):
+            plan = {}
+
         if len(periods) > 1 and not plan.get("trend", False):
             time_dims = ["date", "week", "month", "yearMonth"]
-            dimensions = [d for d in dimensions if d["name"] not in time_dims]
+            dimensions = [d for d in dimensions if d.get("name") not in time_dims]
 
         credentials = Credentials(
             token=session['credentials']['token'],
@@ -708,13 +784,20 @@ class GA4AnalysisEngine:
             # 🔥 Auto OrderBy for Top-N
             order_bys = None
             if state.get("limit") and metrics:
-                primary_metric = metrics[0]["name"]
-                order_bys = [
-                    OrderBy(
-                        metric=OrderBy.MetricOrderBy(metric_name=primary_metric),
-                        desc=True
-                    )
-                ]
+                order_metric = None
+                for m in metrics:
+                    if m["name"] in GA4_METRICS:
+                        order_metric = m["name"]
+                        break
+
+                if order_metric:
+                    order_bys = [
+                        OrderBy(
+                            metric=OrderBy.MetricOrderBy(metric_name=order_metric),
+                            desc=True
+                        )
+                    ]
+
 
             request = RunReportRequest(
                 property=f"properties/{property_id}",
@@ -784,9 +867,17 @@ class GA4AnalysisEngine:
             logging.warning(f"[Safety] analysis_plan corrupted in _calculate_metrics: {type(plan)}")
             plan = {}
 
-        metrics = plan.get("metrics") or state.get("metrics", [{"name": "activeUsers"}])
+        metrics = plan.get("metrics") or state.get("metrics") or [{"name": DEFAULT_METRIC}]
 
-        periods = state.get("periods", [])
+        dimensions = state.get("dimensions")
+        if not isinstance(dimensions, list):
+            dimensions = []
+
+        if not dimensions and DEFAULT_TIME_DIMENSION:
+            dimensions = [{"name": DEFAULT_TIME_DIMENSION}]
+
+        periods = state.get("periods") or []
+
 
         result = {
             "metrics": {},
@@ -1085,12 +1176,13 @@ def handle_question(
 
                 logging.info("[Followup Detector] last_result 없음 → GA4 새 분석 실행")
 
-            # 일반 GA4 실행
-            res = ga4_engine.process(
-                question,
-                active_property,
-                conversation_id,
-                prev_source,
+            # 🔥 Use NEW PIPELINE instead of old engine
+            from integration_wrapper import handle_ga4_question
+            
+            res = handle_ga4_question(
+                question=question,
+                property_id=active_property,
+                conversation_id=conversation_id,
                 semantic=semantic
             )
 

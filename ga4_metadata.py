@@ -325,11 +325,13 @@ GA4_DIMENSIONS = {
         "priority": 4,
         "description": "new / returning"
     },
-        "itemBrand": {
+    "itemBrand": {
         "ui_name": "상품 브랜드",
         "aliases": ["브랜드"],
         "kr_semantics": ["브랜드명"],
         "category": "ecommerce",
+        "scope": "item",
+        "priority": 3,
         "description": "상품의 브랜드 이름"
     },
 
@@ -378,6 +380,9 @@ GA4_DIMENSIONS = {
         "aliases": ["상품아이디"],
         "kr_semantics": ["제품ID"],
         "category": "ecommerce",
+        "scope": "item",
+        "priority": 4,
+        "is_label": True,
         "description": "상품의 ID"
     },
 
@@ -418,6 +423,9 @@ GA4_DIMENSIONS = {
         "aliases": ["상품명", "제품명"],
         "kr_semantics": ["아이템이름"],
         "category": "ecommerce",
+        "scope": "item",
+        "priority": 5,
+        "is_label": True,
         "description": "상품의 이름"
     },
 
@@ -461,14 +469,7 @@ GA4_DIMENSIONS = {
         "description": "상품의 변형 옵션"
     },
 
-    "landingPage": {
-        "ui_name": "방문 페이지",
-        "aliases": ["랜딩페이지"],
-        "kr_semantics": ["첫페이지"],
-        "category": "page",
-        "description": "세션의 첫 번째 페이지 경로"
-    },
-
+    
     "landingPagePlusQueryString": {
         "ui_name": "방문 페이지 + 쿼리 문자열",
         "aliases": ["랜딩페이지쿼리"],
@@ -856,7 +857,7 @@ GA4_METRICS = {
         "category": "ecommerce",
         "priority": 5,
         "concept": "ecommerce",
-        "scope": "event",
+        "scope": "event",  # Event-scoped (전체 구매 이벤트 수익)
         "description": "구매 수익"
     },
     "totalRevenue": {
@@ -989,10 +990,10 @@ GA4_METRICS = {
     },
     "itemRevenue": {
         "ui_name": "상품 수익",
-        "aliases": ["상품매출"],
-        "kr_semantics": ["상품 순수익"],
+        "aliases": ["상품매출", "아이템매출", "상품별매출", "제품매출", "상품수익"],
+        "kr_semantics": ["상품 수익", "아이템 매출", "상품별 매출"],
         "category": "ecommerce",
-        "priority": 4,
+        "priority": 5,  # 높은 우선순위
         "concept": "ecommerce",
         "scope": "item",
         "description": "상품 수익 (환불 제외)"

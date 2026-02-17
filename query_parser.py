@@ -373,17 +373,7 @@ class QueryParser:
                 if llm_limit:
                     delta["limit"] = llm_limit
 
-            if main_m:
-                metric_obj = main_m[0]
-                found_metrics.append(metric_obj["name"])
-
-                # 🔥 mid-confidence → clarify 후보 저장
-                if metric_obj.get("needs_clarify"):
-                    delta["clarify_candidates"].append({
-                        "type": "metric",
-                        "candidate": metric_obj["name"],
-                        "confidence": metric_obj.get("confidence")
-                    })
+            
 
             
        
@@ -391,10 +381,25 @@ class QueryParser:
         found_metrics = list(dict.fromkeys(found_metrics))
 
         # 🔥 상품/아이템 키워드가 있으면 itemRevenue 자동 포함
-        if any(k in q_lower for k in ["상품", "상품별", "아이템", "제품"]):
-            if "itemRevenue" not in found_metrics:
-                found_metrics.append("itemRevenue")
-                logging.info("[AutoRepair] itemRevenue auto-added due to product keyword")
+        # 🔥 metric scope 기반 dimension 정합
+        if delta["metrics"]:
+            metric_scopes = set(
+                GA4_METRICS.get(m["name"], {}).get("scope", "event")
+                for m in delta["metrics"]
+            )
+
+            if "item" in metric_scopes:
+                # item scope metric 존재 시 item scope dimension만 허용
+                valid_item_dims = [
+                    d_key for d_key, d_meta in GA4_DIMENSIONS.items()
+                    if d_meta.get("scope") == "item"
+                ]
+
+                if delta["dimensions"]:
+                    delta["dimensions"] = [
+                        d for d in delta["dimensions"]
+                        if d["name"] in valid_item_dims
+                    ]
 
         # Multi-metric auto intent override
         if len(found_metrics) > 1:
@@ -444,9 +449,9 @@ class QueryParser:
 
       
         # 🔥 Category-based Auto Dimension Repair
-    
-        if not delta["dimensions"]:
+        candidate_dims = []
 
+        if not delta["dimensions"]:
             metric_categories = set()
             metric_scopes = set()
 
@@ -457,23 +462,21 @@ class QueryParser:
                     metric_categories.add(m_meta["category"])
                 metric_scopes.add(m_meta.get("scope", "event"))
 
-            candidate_dims = []
-
             for d_key, d_meta in GA4_DIMENSIONS.items():
-                if d_meta.get("category") in metric_categories:
+                dim_category = d_meta.get("category")
+                dim_scope = d_meta.get("scope", "event")
 
-                    # 🚨 event metric이면 item dimension 자동선택 제외
-                    if "event" in metric_scopes and d_key.startswith("item"):
-                        continue
-
+                if (
+                    dim_category in metric_categories
+                    and dim_scope in metric_scopes
+                    and dim_category != "time"
+                ):
                     candidate_dims.append((d_key, d_meta.get("priority", 0)))
 
-            if candidate_dims:
-                candidate_dims.sort(key=lambda x: x[1], reverse=True)
-                best_dim = candidate_dims[0][0]
-                delta["dimensions"] = [{"name": best_dim}]
-                logging.info(f"[AutoRepair] Dimension auto-selected: {best_dim}")
-
+        if not delta["dimensions"] and candidate_dims:
+            candidate_dims.sort(key=lambda x: x[1], reverse=True)
+            best_dim = candidate_dims[0][0]
+            delta["dimensions"] = [{"name": best_dim}]
 
         # 4. Event Candidate
         event_patterns = [r'([a-zA-Z0-9_]+)\s*이벤트', r'([a-zA-Z0-9_]+)\s*event']

@@ -63,18 +63,21 @@ class StateResolver:
         # ✅ 현재 scope 계산 (중요: 여기서 current_scope가 정의됨)
         current_scope = detect_scope(metrics)
 
-        # 3. Dimension Resolution (scope 변경 시 상속 차단)
+        # 3. Dimension Resolution
+        dimensions = delta.get("dimensions") or []
+
         if last_state.get("scope_type") and last_state.get("scope_type") != current_scope:
             logging.info(f"[StateResolver] Scope changed ({last_state.get('scope_type')} -> {current_scope}) → block inheritance")
-            dimensions = delta.get("dimensions") or []
+
         else:
-            dimensions = delta.get("dimensions") or []
             if not dimensions and last_state.get("dimensions"):
                 dimensions = last_state["dimensions"]
 
             if intent == "breakdown" and delta.get("dimensions"):
                 dimensions = delta["dimensions"]
 
+
+        
         # 4. Date/Period Resolution
         start_date = delta.get("start_date") or last_state.get("start_date")
         end_date = delta.get("end_date") or last_state.get("end_date")
