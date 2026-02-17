@@ -1,5 +1,6 @@
 Flask==3.0.0
 Werkzeug==3.0.1
+gunicorn==22.0.0
 
 pandas==2.2.0
 numpy==1.26.4
@@ -28,5 +29,4 @@ langsmith==0.1.147
 packaging==23.2
 scikit-learn
 joblib
-
 

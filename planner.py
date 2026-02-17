@@ -113,9 +113,115 @@ class GA4Planner:
             ExecutionPlan
         """
         logging.info(f"[Planner] Building plan for intent={intent}")
+        modifiers = dict(modifiers or {})
+
+        # "전체 항목" 후속질문은 직전 breakdown 맥락을 강제 재사용
+        if modifiers.get("all_items") and last_state and last_state.get("dimensions"):
+            intent = "breakdown"
+            modifiers["needs_breakdown"] = True
+            modifiers["needs_total"] = False
+            modifiers.pop("limit", None)
+            metric_candidates = []
+            for m in last_state.get("metrics", []) or []:
+                m_name = m.get("name")
+                if not m_name:
+                    continue
+                metric_candidates.append({
+                    "name": m_name,
+                    "score": 0.99,
+                    "matched_by": "last_state_all_items",
+                    "scope": self._metric_scope(m_name),
+                    "priority": GA4_METRICS.get(m_name, {}).get("priority", 0),
+                })
+            dimension_candidates = []
+            for d in last_state.get("dimensions", []) or []:
+                d_name = d.get("name")
+                if not d_name:
+                    continue
+                dim_meta = GA4_DIMENSIONS.get(d_name, {})
+                dim_scope = dim_meta.get("scope") or self.CATEGORY_TO_SCOPE.get(dim_meta.get("category"), "event")
+                dimension_candidates.append({
+                    "name": d_name,
+                    "score": 0.99,
+                    "matched_by": "last_state_all_items",
+                    "scope": dim_scope,
+                    "category": dim_meta.get("category"),
+                    "priority": dim_meta.get("priority", 0),
+                })
         
         # 1. Date 확정
         start_date, end_date = self._resolve_dates(date_range, last_state)
+
+        # 1.5 Context 보강:
+        # TopN/Breakdown follow-up에서 후보가 비어 있으면 이전 state를 재사용한다.
+        metric_candidates = metric_candidates or []
+        dimension_candidates = dimension_candidates or []
+        if intent in ["topn", "breakdown"] and last_state:
+            # dimension이 명시된 새 질문(예: 채널별/디바이스별)이면
+            # 이전 metric을 무조건 재사용하지 않는다.
+            if not metric_candidates and not dimension_candidates and last_state.get("metrics"):
+                metric_candidates = []
+                for m in last_state.get("metrics", []):
+                    m_name = m.get("name")
+                    if not m_name:
+                        continue
+                    metric_candidates.append({
+                        "name": m_name,
+                        "score": 0.80,
+                        "matched_by": "last_state",
+                        "scope": self._metric_scope(m_name),
+                        "priority": GA4_METRICS.get(m_name, {}).get("priority", 0),
+                    })
+            if not dimension_candidates and last_state.get("dimensions"):
+                dimension_candidates = []
+                for d in last_state.get("dimensions", []):
+                    d_name = d.get("name")
+                    if not d_name:
+                        continue
+                    dim_meta = GA4_DIMENSIONS.get(d_name, {})
+                    dim_scope = dim_meta.get("scope") or self.CATEGORY_TO_SCOPE.get(dim_meta.get("category"), "event")
+                    dimension_candidates.append({
+                        "name": d_name,
+                        "score": 0.80,
+                        "matched_by": "last_state",
+                        "scope": dim_scope,
+                        "category": dim_meta.get("category"),
+                        "priority": dim_meta.get("priority", 0),
+                    })
+            if "scope_hint" not in modifiers and dimension_candidates:
+                inferred_scope = dimension_candidates[0].get("scope")
+                if inferred_scope:
+                    modifiers["scope_hint"] = [inferred_scope]
+        # metric_single라도 breakdown 힌트가 있으면 이전 metric을 재사용
+        if intent == "metric_single" and modifiers.get("needs_breakdown") and last_state and not metric_candidates:
+            if last_state.get("metrics"):
+                metric_candidates = []
+                for m in last_state.get("metrics", []):
+                    m_name = m.get("name")
+                    if not m_name:
+                        continue
+                    metric_candidates.append({
+                        "name": m_name,
+                        "score": 0.80,
+                        "matched_by": "last_state",
+                        "scope": self._metric_scope(m_name),
+                        "priority": GA4_METRICS.get(m_name, {}).get("priority", 0),
+                    })
+        # breakdown/topn에서도 metric 후보가 비어 있으면 이전 metric 재사용
+        if intent in ["breakdown", "topn"] and modifiers.get("needs_breakdown") and last_state and not metric_candidates:
+            if last_state.get("metrics"):
+                metric_candidates = []
+                for m in last_state.get("metrics", []):
+                    m_name = m.get("name")
+                    if not m_name:
+                        continue
+                    metric_candidates.append({
+                        "name": m_name,
+                        "score": 0.86,
+                        "matched_by": "last_state_breakdown_metric",
+                        "scope": self._metric_scope(m_name),
+                        "priority": GA4_METRICS.get(m_name, {}).get("priority", 0),
+                    })
         
         # 2. Metrics 확정
         final_metrics = self._select_metrics(metric_candidates, intent, modifiers)
@@ -186,9 +292,79 @@ class GA4Planner:
         """
         if not candidates:
             return [{"name": DEFAULT_METRIC}]
+        if not modifiers:
+            modifiers = {}
         
         # score 기준 정렬
         sorted_candidates = sorted(candidates, key=lambda x: x.get("score", 0), reverse=True)
+        scope_hints = modifiers.get("scope_hint", []) if modifiers else []
+
+        # scope 힌트가 있으면 우선 적용 (총합+상세 복합이 아닌 일반 breakdown/topn)
+        if scope_hints and not modifiers.get("needs_total"):
+            preferred_scope = scope_hints[0]
+            scoped = [c for c in sorted_candidates if self._metric_scope(c["name"]) == preferred_scope]
+            if scoped:
+                sorted_candidates = scoped + [c for c in sorted_candidates if c not in scoped]
+
+        # breakdown 질문은 단일 total보다 breakdown 적합 metric(item/event)을 우선
+        if intent in ["breakdown", "topn"] and len(sorted_candidates) > 1:
+            preferred = []
+            others = []
+            for c in sorted_candidates:
+                n = c.get("name", "")
+                if n in ["itemRevenue", "purchaseRevenue", "purchaserRate", "purchaseToViewRate", "eventCount", "keyEvents", "transactions"]:
+                    preferred.append(c)
+                else:
+                    others.append(c)
+            if preferred:
+                sorted_candidates = preferred + others
+
+        # 복합 질문 처리:
+        # 예) "총 매출 + 상품별 매출 TOP N"
+        # - breakdown scope(예: item) 1개
+        # - total용 scope(예: event) 1개를 함께 선택
+        if modifiers.get("needs_total") and (modifiers.get("needs_breakdown") or intent in ["breakdown", "topn"]):
+            scope_hints = modifiers.get("scope_hint", [])
+            breakdown_scope = scope_hints[0] if scope_hints else None
+            if not breakdown_scope:
+                breakdown_scope = self._metric_scope(sorted_candidates[0]["name"])
+
+            breakdown_metric = None
+            for c in sorted_candidates:
+                if self._metric_scope(c["name"]) == breakdown_scope:
+                    breakdown_metric = c["name"]
+                    break
+            if not breakdown_metric:
+                breakdown_metric = sorted_candidates[0]["name"]
+
+            selected = [breakdown_metric]
+
+            # total metric은 다른 scope에서, 가능한 경우 같은 concept로 맞춤
+            breakdown_concept = self._metric_concept(breakdown_metric)
+            total_metric = None
+            for c in sorted_candidates:
+                c_name = c["name"]
+                if c_name in selected:
+                    continue
+                if self._metric_scope(c_name) == breakdown_scope:
+                    continue
+                if breakdown_concept and self._metric_concept(c_name) == breakdown_concept:
+                    total_metric = c_name
+                    break
+
+            if not total_metric:
+                for c in sorted_candidates:
+                    c_name = c["name"]
+                    if c_name in selected:
+                        continue
+                    if self._metric_scope(c_name) != breakdown_scope:
+                        total_metric = c_name
+                        break
+
+            if total_metric:
+                selected = [total_metric, breakdown_metric]
+
+            return [{"name": m} for m in selected]
         
         if intent in ["metric_multi", "comparison"]:
             # 여러 개 허용 (최대 5개)
@@ -218,6 +394,13 @@ class GA4Planner:
         """
         if not modifiers:
             modifiers = {}
+
+        # 강제 차원 지정 (프로파일 조회 등)
+        forced = modifiers.get("force_dimensions") or []
+        if forced:
+            valid = [{"name": d} for d in forced if d in GA4_DIMENSIONS]
+            if valid:
+                return valid
         
         # Trend: time dimension 우선
         if intent == "trend" or modifiers.get("needs_trend"):
@@ -314,15 +497,72 @@ class GA4Planner:
         scope_groups = self._split_metrics_by_scope(metrics)
         
         blocks = []
+        needs_total = modifiers.get("needs_total", False)
+        needs_breakdown = modifiers.get("needs_breakdown", False) or intent in ["breakdown", "topn"]
+
+        # 복합 scope 최적화:
+        # total + breakdown이면서 scope가 2개 이상이면
+        # - total은 event 우선 1개 scope
+        # - breakdown은 scope_hint(없으면 item 우선) 1개 scope
+        if needs_total and needs_breakdown and len(scope_groups) > 1:
+            scope_hints = modifiers.get("scope_hint", [])
+            breakdown_scope = scope_hints[0] if scope_hints and scope_hints[0] in scope_groups else None
+            if not breakdown_scope:
+                breakdown_scope = "item" if "item" in scope_groups else next(iter(scope_groups.keys()))
+
+            non_breakdown = [s for s in scope_groups.keys() if s != breakdown_scope]
+            if "event" in non_breakdown:
+                total_scope = "event"
+            elif non_breakdown:
+                total_scope = non_breakdown[0]
+            else:
+                total_scope = breakdown_scope
+
+            # total block
+            total_metrics = scope_groups.get(total_scope, [])
+            if total_metrics:
+                blocks.append(PlanBlock(
+                    block_id=f"total_{total_scope}",
+                    scope=total_scope,
+                    block_type="total",
+                    metrics=total_metrics,
+                    dimensions=[],
+                    title=f"{total_scope.upper()} 전체 요약"
+                ))
+
+            # breakdown block
+            breakdown_metrics = scope_groups.get(breakdown_scope, [])
+            if breakdown_metrics:
+                scoped_dims = self._filter_dimensions_by_scope(dimensions, breakdown_scope)
+                breakdown_dims = scoped_dims or self._get_default_dimension_for_scope(breakdown_scope)
+                blocks.append(self._create_breakdown_block(
+                    breakdown_scope, breakdown_metrics, breakdown_dims, modifiers
+                ))
+
+            return blocks
+
+        # Trend는 합계(total)가 아니라 시계열(trend) 블록으로 고정
+        if intent == "trend" or modifiers.get("needs_trend"):
+            for scope, scope_metrics in scope_groups.items():
+                scoped_dims = self._filter_dimensions_by_scope(dimensions, scope)
+                trend_dims = scoped_dims or ([{"name": DEFAULT_TIME_DIMENSION}] if DEFAULT_TIME_DIMENSION else [])
+                trend_filters = self._build_entity_filters(scope, modifiers, trend_dims)
+                blocks.append(PlanBlock(
+                    block_id=f"trend_{scope}",
+                    scope=scope,
+                    block_type="trend",
+                    metrics=scope_metrics,
+                    dimensions=trend_dims,
+                    filters=trend_filters,
+                    title=f"{scope.upper()} 추이"
+                ))
+            return blocks
         
         for scope, scope_metrics in scope_groups.items():
             # Dimension 필터링 (scope 일치)
             scoped_dims = self._filter_dimensions_by_scope(dimensions, scope)
             
             # "총합 + breakdown" 패턴 감지
-            needs_total = modifiers.get("needs_total", False)
-            needs_breakdown = modifiers.get("needs_breakdown", False) or intent in ["breakdown", "topn"]
-            
             if needs_total and needs_breakdown:
                 # Block 1: Total (dimension 없음)
                 total_block = PlanBlock(
@@ -363,6 +603,13 @@ class GA4Planner:
                 blocks.append(total_block)
         
         return blocks
+
+    def _metric_scope(self, metric_name: str) -> str:
+        meta = GA4_METRICS.get(metric_name, {})
+        return meta.get("scope") or self.CATEGORY_TO_SCOPE.get(meta.get("category"), "event")
+
+    def _metric_concept(self, metric_name: str) -> str:
+        return GA4_METRICS.get(metric_name, {}).get("concept")
     
     def _create_breakdown_block(
         self,
@@ -387,6 +634,11 @@ class GA4Planner:
             }]
         
         title = f"{scope.upper()} 상세" if not limit else f"{scope.upper()} TOP {limit}"
+
+        filters = self._build_entity_filters(scope, modifiers, dimensions)
+        entity_terms = modifiers.get("entity_contains") or modifiers.get("item_name_contains") or []
+        if entity_terms:
+            title += f" ({', '.join(entity_terms)})"
         
         return PlanBlock(
             block_id=f"breakdown_{scope}",
@@ -394,10 +646,50 @@ class GA4Planner:
             block_type=block_type,
             metrics=metrics,
             dimensions=dimensions,
+            filters=filters,
             order_bys=order_bys,
             limit=limit,
             title=title
         )
+
+    def _build_entity_filters(self, scope: str, modifiers: Dict, dimensions: List[Dict]) -> Dict[str, Any]:
+        filters = {}
+        if modifiers.get("event_filter"):
+            filters["event_filter"] = modifiers.get("event_filter")
+        entity_terms = modifiers.get("entity_contains") or modifiers.get("item_name_contains") or []
+        if not entity_terms:
+            return filters
+
+        hint_field = modifiers.get("entity_field_hint")
+        field = hint_field
+        available_dims = {d.get("name") for d in dimensions if isinstance(d, dict)}
+        # 힌트 필드는 dimensions에 없더라도 GA4 메타에 존재하면 필터에 사용
+        if field and field not in GA4_DIMENSIONS and field not in available_dims:
+            field = None
+        if not field:
+            if scope == "item":
+                field = "itemName"
+            else:
+                for cand in ["customEvent:donation_name", "eventName", "linkText", "defaultChannelGroup", "sourceMedium", "landingPage"]:
+                    if cand in available_dims:
+                        field = cand
+                        break
+                if not field:
+                    for cand in ["customEvent:donation_name", "eventName", "linkText", "sourceMedium"]:
+                        if cand in GA4_DIMENSIONS:
+                            field = cand
+                            break
+        if not field:
+            field = "itemName" if scope == "item" else (next(iter(available_dims)) if available_dims else None)
+        if not field:
+            return filters
+
+        filters["dimension_filters"] = [
+            {"field": field, "match_type": "contains", "value": t}
+            for t in entity_terms
+        ]
+        filters["dimension_filters_operator"] = "or" if len(entity_terms) > 1 else "and"
+        return filters
     
     def _select_primary_metric(self, metrics: List[Dict]) -> str:
         """

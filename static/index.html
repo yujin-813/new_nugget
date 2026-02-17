@@ -264,6 +264,39 @@
             box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
         }
 
+        .message p {
+            margin: 0;
+            white-space: pre-wrap;
+            word-break: keep-all;
+        }
+
+        .followup-box {
+            margin-top: 12px;
+            padding: 10px 12px;
+            border-radius: 8px;
+            background: #eef4ff;
+            border: 1px solid #d6e3ff;
+        }
+
+        .followup-title {
+            font-size: 12px;
+            font-weight: 700;
+            color: #2f4f8f;
+            margin-bottom: 6px;
+        }
+
+        .followup-list {
+            margin: 0;
+            padding-left: 18px;
+            color: #30425f;
+            font-size: 13px;
+            line-height: 1.5;
+        }
+
+        .followup-list li {
+            margin: 3px 0;
+        }
+
         /* Clarify Chips */
         .clarify-container {
             display: flex;
@@ -887,6 +920,8 @@
                     <button class="primary-btn" onclick="saveReport()">저장</button>
                     <button class="outline-btn" style="color:var(--text-main); border-color:var(--text-muted);"
                         onclick="downloadReportAsImage()">다운로드</button>
+                    <button class="outline-btn" style="color:var(--text-main); border-color:var(--text-muted);"
+                        onclick="exportReportToNotion()">Notion 추출</button>
 
 
                     <!-- [PHASE 3] Report Agent Input -->
@@ -1090,7 +1125,9 @@
                 } else {
                     const plotData = response.plot_data || null;
                     const structuredInsight = response.structured_insight || null;
-                    appendMessage('bot', response.message || "응답이 없습니다.", plotData, structuredInsight);
+                    const followups = Array.isArray(response.followup_suggestions) ? response.followup_suggestions : [];
+                    const botText = response.message || "응답이 없습니다.";
+                    appendMessage('bot', botText, plotData, structuredInsight, followups);
                 }
 
                 if (data.route) {
@@ -1105,6 +1142,37 @@
                 isFetching = false;
                 document.getElementById('ask-button').disabled = false;
             }
+        }
+
+        function buildPlotDataFromRows(rows, preferredType = 'bar') {
+            if (!Array.isArray(rows) || rows.length === 0 || typeof rows[0] !== 'object') return null;
+            const sample = rows[0];
+            const keys = Object.keys(sample);
+            if (keys.length === 0) return null;
+
+            const toNum = (v) => {
+                if (v === null || v === undefined) return null;
+                const n = Number(String(v).replace(/[^\d.-]/g, ''));
+                return Number.isFinite(n) ? n : null;
+            };
+
+            let labelKey = keys.find(k => toNum(sample[k]) === null) || keys[0];
+            const metricKeys = keys.filter(k => k !== labelKey).filter(k => {
+                let cnt = 0;
+                rows.slice(0, 20).forEach(r => { if (toNum(r[k]) !== null) cnt += 1; });
+                return cnt >= 1;
+            }).slice(0, 2);
+
+            if (metricKeys.length === 0) return null;
+
+            return {
+                type: preferredType,
+                labels: rows.map(r => String(r[labelKey] ?? "")),
+                series: metricKeys.map(k => ({
+                    name: k,
+                    data: rows.map(r => toNum(r[k]) ?? 0)
+                }))
+            };
         }
 
         function renderMultiScopeBlocks(response) {
@@ -1132,20 +1200,115 @@
                 }
 
                 card.innerHTML = html;
+
+                let plotData = null;
+                if (block.scope === "item" && Array.isArray(block.data)) {
+                    plotData = buildPlotDataFromRows(block.data, 'bar');
+                } else if (block.scope === "event" && block.data && typeof block.data === "object") {
+                    const rows = Object.entries(block.data).map(([k, v]) => ({ metric: k, value: v }));
+                    plotData = buildPlotDataFromRows(rows, 'bar');
+                }
+
+                if (plotData && plotData.labels && plotData.series) {
+                    const actions = document.createElement('div');
+                    actions.className = 'card-actions';
+
+                    const vizBtn = document.createElement('button');
+                    vizBtn.className = 'add-to-report viz-btn';
+                    vizBtn.innerHTML = '<i class="fas fa-chart-bar"></i> 시각화하기';
+                    vizBtn.onclick = () => {
+                        const chartId = 'chart-' + generateUniqueId();
+                        const chartCont = document.createElement('div');
+                        chartCont.id = chartId;
+                        chartCont.style.marginTop = '15px';
+                        chartCont.style.backgroundColor = '#fff';
+                        chartCont.style.padding = '10px';
+                        chartCont.style.borderRadius = '8px';
+                        chartCont.style.boxShadow = '0 2px 8px rgba(0,0,0,0.05)';
+                        card.appendChild(chartCont);
+                        renderApexChart(chartId, plotData);
+                        vizBtn.disabled = true;
+                        vizBtn.style.opacity = '0.5';
+                    };
+                    actions.appendChild(vizBtn);
+
+                    const reportBtn = document.createElement('button');
+                    reportBtn.className = 'add-to-report';
+                    reportBtn.innerHTML = '<i class="fas fa-file-alt"></i> 리포트에 추가';
+                    reportBtn.onclick = () => {
+                        addToReport(getReportSafeHtml(card), plotData);
+                        openReportPanel();
+                    };
+                    actions.appendChild(reportBtn);
+
+                    card.appendChild(actions);
+                }
                 chat.appendChild(card);
             });
 
             chat.scrollTop = chat.scrollHeight;
         }
 
+        function escapeHtml(text) {
+            return String(text ?? "")
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
 
+        function formatMessageHtml(text) {
+            const escaped = escapeHtml(text).replace(/\r\n/g, '\n');
+            return escaped
+                .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+                .replace(/\n/g, '<br>');
+        }
 
-        function appendMessage(role, text, plotData = null, structuredInsight = null) {
+        function extractMessageAndFollowups(text, explicitFollowups = []) {
+            let message = String(text || "").replace(/\r\n/g, '\n');
+            const followups = Array.isArray(explicitFollowups) ? [...explicitFollowups] : [];
+
+            const normalized = message.replace(/<br\s*\/?>/gi, '\n');
+            const marker = normalized.search(/다음\s*질문\s*추천/i);
+            if (marker >= 0) {
+                const before = normalized.slice(0, marker).trim();
+                const after = normalized.slice(marker);
+                const found = [...after.matchAll(/(?:^|\n)\s*\d+\.\s*(.+?)(?=\n|$)/g)].map(m => m[1].trim()).filter(Boolean);
+                if (found.length > 0) {
+                    followups.push(...found);
+                }
+                message = before;
+            } else {
+                message = normalized.trim();
+            }
+
+            const unique = [];
+            const seen = new Set();
+            followups.forEach(item => {
+                const key = String(item || "").trim();
+                if (!key) return;
+                if (seen.has(key)) return;
+                seen.add(key);
+                unique.push(key);
+            });
+
+            return { message, followups: unique };
+        }
+
+        function getReportSafeHtml(element) {
+            const clone = element.cloneNode(true);
+            clone.querySelectorAll('.btn-group, .card-actions, .followup-box, .followup-title').forEach(el => el.remove());
+            return clone.innerHTML;
+        }
+
+        function appendMessage(role, text, plotData = null, structuredInsight = null, followups = []) {
             const chat = document.getElementById('chat');
+            const parsed = extractMessageAndFollowups(text, followups);
 
             // [PHASE 1] Render analysis card if structured insight is available
             if (role === 'bot' && structuredInsight) {
-                renderAnalysisCard(structuredInsight, plotData);
+                renderAnalysisCard(structuredInsight, plotData, parsed.followups);
 
                 // [PHASE 3] Auto-add to report if checkbox is checked
                 const autoAddCheckbox = document.getElementById('auto-add-to-report');
@@ -1182,10 +1345,7 @@
                             // We need to pass the raw HTML content (title, metrics, etc.)
                             // clone and remove actions?
                             const clone = lastCard.cloneNode(true);
-                            const actions = clone.querySelector('.card-actions');
-                            if (actions) actions.remove();
-
-                            addToReport(clone.innerHTML, plotData);
+                            addToReport(getReportSafeHtml(clone), plotData);
                         }
                     }, 100);
                 }
@@ -1195,7 +1355,19 @@
             // Original message rendering
             const div = document.createElement('div');
             div.className = `message ${role === 'user' ? 'user-message' : 'bot-message'}`;
-            div.innerHTML = `<p><strong>${role === 'user' ? 'You' : 'Bot'}:</strong> ${text}</p>`;
+            const bodyHtml = role === 'bot' ? formatMessageHtml(parsed.message) : escapeHtml(parsed.message);
+            div.innerHTML = `<p><strong>${role === 'user' ? 'You' : 'Bot'}:</strong> ${bodyHtml}</p>`;
+
+            if (role === 'bot' && parsed.followups.length > 0) {
+                const followupBox = document.createElement('div');
+                followupBox.className = 'followup-box';
+                const listHtml = parsed.followups.map(item => `<li>${escapeHtml(item)}</li>`).join('');
+                followupBox.innerHTML = `
+                    <div class="followup-title">다음 질문 추천</div>
+                    <ol class="followup-list">${listHtml}</ol>
+                `;
+                div.appendChild(followupBox);
+            }
 
             if (role === 'bot') {
                 const btnGroup = document.createElement('div');
@@ -1230,7 +1402,7 @@
                 const reportBtn = document.createElement('button');
                 reportBtn.className = 'add-to-report';
                 reportBtn.innerHTML = '<i class="fas fa-file-alt"></i> 리포트에 추가';
-                reportBtn.onclick = () => { addToReport(text, plotData); openReportPanel(); };
+                reportBtn.onclick = () => { addToReport(getReportSafeHtml(div), plotData); openReportPanel(); };
                 btnGroup.appendChild(reportBtn);
 
                 div.appendChild(btnGroup);
@@ -1240,7 +1412,7 @@
         }
 
         // [PHASE 1] Render Analysis Card
-        function renderAnalysisCard(data, plotData = null) {
+        function renderAnalysisCard(data, plotData = null, followups = []) {
             const chat = document.getElementById('chat');
             const card = document.createElement('div');
             card.className = 'analysis-card';
@@ -1271,6 +1443,17 @@
 
             card.innerHTML = html;
 
+            if (Array.isArray(followups) && followups.length > 0) {
+                const followupBox = document.createElement('div');
+                followupBox.className = 'followup-box';
+                const listHtml = followups.map(item => `<li>${escapeHtml(item)}</li>`).join('');
+                followupBox.innerHTML = `
+                    <div class="followup-title">다음 질문 추천</div>
+                    <ol class="followup-list">${listHtml}</ol>
+                `;
+                card.appendChild(followupBox);
+            }
+
             // Add action buttons
             const actions = document.createElement('div');
             actions.className = 'card-actions';
@@ -1300,7 +1483,7 @@
             reportBtn.className = 'add-to-report';
             reportBtn.innerHTML = '<i class="fas fa-file-alt"></i> 리포트에 추가';
             reportBtn.onclick = () => {
-                addToReport(card.innerHTML, plotData);
+                addToReport(getReportSafeHtml(card), plotData);
                 openReportPanel();
             };
             actions.appendChild(reportBtn);
@@ -1873,6 +2056,44 @@
             } catch (err) {
                 alert('리포트 저장 중 오류가 발생했습니다.');
                 console.error(err);
+            }
+        }
+
+        async function exportReportToNotion() {
+            const column = document.querySelector('.report-column');
+            if (!column || column.children.length === 0) {
+                alert('추출할 리포트 내용이 없습니다.');
+                return;
+            }
+
+            const titleInput = document.getElementById('report-title');
+            const title = titleInput ? (titleInput.value.trim() || "Untitled Report") : "Untitled Report";
+            const content = column.innerHTML;
+
+            try {
+                const res = await fetch('/export_report/notion', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ title, content })
+                });
+                const data = await res.json();
+                if (!data.success) {
+                    alert('Notion 추출 실패: ' + (data.error || '알 수 없는 오류'));
+                    return;
+                }
+
+                const blob = new Blob([data.markdown || ""], { type: 'text/markdown;charset=utf-8' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = data.filename || 'report.md';
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+            } catch (err) {
+                console.error('Notion export error:', err);
+                alert('Notion 추출 중 오류가 발생했습니다.');
             }
         }
 

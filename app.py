@@ -1,5 +1,6 @@
 import logging
-from flask import Flask, request, jsonify, session, redirect, url_for, send_from_directory
+from datetime import timedelta
+from flask import Flask, request, jsonify, session, redirect, url_for, send_from_directory, Response
 from werkzeug.utils import secure_filename
 from oauthlib.oauth2 import WebApplicationClient
 import google.auth.transport.requests
@@ -10,22 +11,72 @@ import os
 import json
 import logging
 import pandas as pd
+import re
+from html import unescape
 from urllib.parse import unquote
+from dotenv import load_dotenv
+from typing import Any, Dict, List, Tuple
 from qa_module import handle_question, generate_unique_id
 import base64
 import urllib.parse
 from db_manager import DBManager
 from file_engine import file_engine
 from db_manager import DBManager
+from google.analytics.data_v1beta import BetaAnalyticsDataClient
+from google.analytics.data_v1beta.types import RunReportRequest, DateRange, Dimension, Metric
 DBManager.init_db()
 import math
 from semantic_matcher import SemanticMatcher
 from ga4_metadata import GA4_METRICS, GA4_DIMENSIONS
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+load_dotenv()
 semantic = SemanticMatcher(os.path.join(BASE_DIR, "vectorizer.pkl"))
 semantic.build_metric_index(GA4_METRICS)
 semantic.build_dimension_index(GA4_DIMENSIONS)
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "on", "y"}
+
+
+def _load_google_web_creds() -> dict:
+    """
+    Load Google OAuth web credentials from env or file.
+    Priority:
+      1) GOOGLE_OAUTH_CLIENT_JSON (raw JSON string)
+      2) GOOGLE_OAUTH_CLIENT_JSON_BASE64 (base64 encoded JSON)
+      3) GOOGLE_CLIENT_SECRET_PATH (default: client_secret.json)
+    """
+    raw = os.getenv("GOOGLE_OAUTH_CLIENT_JSON", "").strip()
+    if raw:
+        data = json.loads(raw)
+        return data.get("web", data)
+
+    b64 = os.getenv("GOOGLE_OAUTH_CLIENT_JSON_BASE64", "").strip()
+    if b64:
+        decoded = base64.b64decode(b64.encode("utf-8")).decode("utf-8")
+        data = json.loads(decoded)
+        return data.get("web", data)
+
+    secret_path = os.getenv("GOOGLE_CLIENT_SECRET_PATH", "client_secret.json")
+    with open(secret_path, "r") as f:
+        data = json.loads(f.read())
+    return data.get("web", data)
+
+
+def _require_admin_token() -> bool:
+    expected = os.getenv("ADMIN_API_TOKEN", "").strip()
+    if not expected:
+        return False
+    auth = request.headers.get("Authorization", "")
+    if auth.lower().startswith("bearer "):
+        provided = auth.split(" ", 1)[1].strip()
+        return provided == expected
+    return False
 
 def sanitize(obj):
     if isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)):
@@ -36,13 +87,742 @@ def sanitize(obj):
         return [sanitize(v) for v in obj]
     return obj
 
+
+def _html_to_notion_markdown(title: str, html_content: str) -> str:
+    text = html_content or ""
+    # UI-only blocks should not be exported
+    text = re.sub(r'(?is)<div[^>]*class="[^"]*followup-box[^"]*"[^>]*>.*?</div>', "", text)
+    text = re.sub(r'(?is)<ol[^>]*class="[^"]*followup-list[^"]*"[^>]*>.*?</ol>', "", text)
+    text = re.sub(r'(?is)<ul[^>]*class="[^"]*followup-list[^"]*"[^>]*>.*?</ul>', "", text)
+    text = re.sub(r'(?is)<div[^>]*class="[^"]*followup-title[^"]*"[^>]*>.*?</div>', "", text)
+    text = re.sub(r'(?is)<div[^>]*class="[^"]*card-actions[^"]*"[^>]*>.*?</div>', "", text)
+    text = re.sub(r"(?is)<button[^>]*>.*?</button>", "", text)
+    text = re.sub(r"(?is)<small[^>]*>\s*<strong>\s*다음\s*질문\s*추천.*?</small>", "", text)
+
+    # Block-level tags
+    text = re.sub(r"(?i)<br\s*/?>", "\n", text)
+    text = re.sub(r"(?is)<h1[^>]*>(.*?)</h1>", r"# \1\n", text)
+    text = re.sub(r"(?is)<h2[^>]*>(.*?)</h2>", r"## \1\n", text)
+    text = re.sub(r"(?is)<h3[^>]*>(.*?)</h3>", r"### \1\n", text)
+    text = re.sub(r"(?is)<li[^>]*>(.*?)</li>", r"- \1\n", text)
+    text = re.sub(r"(?is)</p>", "\n\n", text)
+    text = re.sub(r"(?is)</div>", "\n", text)
+
+    # Inline tags
+    text = re.sub(r"(?is)<strong[^>]*>(.*?)</strong>", r"**\1**", text)
+    text = re.sub(r"(?is)<b[^>]*>(.*?)</b>", r"**\1**", text)
+    text = re.sub(r"(?is)<em[^>]*>(.*?)</em>", r"*\1*", text)
+    text = re.sub(r"(?is)<i[^>]*>(.*?)</i>", r"*\1*", text)
+    text = re.sub(r"(?is)<code[^>]*>(.*?)</code>", r"`\1`", text)
+
+    # Remove remaining tags
+    text = re.sub(r"(?is)<script[^>]*>.*?</script>", "", text)
+    text = re.sub(r"(?is)<style[^>]*>.*?</style>", "", text)
+    text = re.sub(r"(?is)<[^>]+>", "", text)
+    text = unescape(text)
+
+    # Cleanup
+    lines = [ln.rstrip() for ln in text.splitlines()]
+    cleaned = []
+    prev_blank = False
+    for ln in lines:
+        blank = (ln.strip() == "")
+        if blank and prev_blank:
+            continue
+        cleaned.append(ln)
+        prev_blank = blank
+
+    body = "\n".join(cleaned).strip()
+    body = re.sub(
+        r"(?ims)^\s*다음\s*질문\s*추천\s*:?\s*$\n(?:\s*\d+\.\s.*(?:\n|$))+",
+        "",
+        body
+    ).strip()
+
+    doc_title = title.strip() if title else "Untitled Report"
+    header = f"# {doc_title}\n\n"
+    if "report-chart-" in (html_content or ""):
+        header += "> 참고: 원본 리포트에 차트 블록이 포함되어 있습니다.\n\n"
+
+    # KPI 추출(숫자 포함 라인)
+    kpi_lines = []
+    for ln in body.splitlines():
+        if re.search(r"\d", ln) and len(ln.strip()) <= 140:
+            kpi_lines.append(ln.strip())
+        if len(kpi_lines) >= 8:
+            break
+    if not kpi_lines:
+        kpi_lines = ["(핵심 KPI를 여기에 입력)"]
+
+    archive_section = (
+        "## 1) 리포트 아카이브\n"
+        f"- 작성일: {pd.Timestamp.now().strftime('%Y-%m-%d')}\n"
+        "- 작성자: \n"
+        "- 데이터 소스: GA4 / File / Mixed\n"
+        "- 분석 기간: \n"
+        "- 리포트 버전: v1\n\n"
+    )
+
+    kpi_section = "## 2) KPI 변화 추적\n" + "\n".join([f"- {k}" for k in kpi_lines]) + "\n\n"
+
+    decision_section = (
+        "## 3) 판단 기록 (Decision Log)\n"
+        "| 날짜 | 관찰/근거 | 판단 | 영향도 | 담당 |\n"
+        "|---|---|---|---|---|\n"
+        "|  |  |  |  |  |\n\n"
+    )
+
+    action_section = (
+        "## 4) 실행 관리 (Action Tracker)\n"
+        "| 실행 항목 | 목적 KPI | 오너 | 기한 | 상태 | 결과 |\n"
+        "|---|---|---|---|---|---|\n"
+        "|  |  |  |  | Todo |  |\n\n"
+    )
+
+    analysis_section = "## 5) 원본 분석 내용\n" + (body if body else "(원본 본문 없음)") + "\n"
+
+    return header + archive_section + kpi_section + decision_section + action_section + analysis_section
+
+
+def _strip_report_html_to_text(html_content: str) -> str:
+    text = html_content or ""
+    text = re.sub(r'(?is)<div[^>]*class="[^"]*followup-box[^"]*"[^>]*>.*?</div>', "", text)
+    text = re.sub(r'(?is)<ol[^>]*class="[^"]*followup-list[^"]*"[^>]*>.*?</ol>', "", text)
+    text = re.sub(r'(?is)<ul[^>]*class="[^"]*followup-list[^"]*"[^>]*>.*?</ul>', "", text)
+    text = re.sub(r'(?is)<div[^>]*class="[^"]*card-actions[^"]*"[^>]*>.*?</div>', "", text)
+    text = re.sub(r"(?is)<button[^>]*>.*?</button>", "", text)
+    text = re.sub(r"(?is)<script[^>]*>.*?</script>", "", text)
+    text = re.sub(r"(?is)<style[^>]*>.*?</style>", "", text)
+    text = re.sub(r"(?i)<br\s*/?>", "\n", text)
+    text = re.sub(r"(?is)</p>", "\n", text)
+    text = re.sub(r"(?is)</div>", "\n", text)
+    text = re.sub(r"(?is)<[^>]+>", "", text)
+    text = unescape(text)
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    return "\n".join(lines)
+
+
+def _safe_float(value: Any) -> float:
+    try:
+        s = re.sub(r"[^\d\.\-]", "", str(value))
+        if s in ("", "-", ".", "-."):
+            return 0.0
+        return float(s)
+    except Exception:
+        return 0.0
+
+
+def _extract_kpi_name(line: str) -> str:
+    cleaned = re.sub(r"^\s*(Bot:|You:)\s*", "", line, flags=re.I).strip()
+    cleaned = re.sub(r"^[^\w가-힣]+", "", cleaned).strip()
+    line = cleaned or line
+    m = re.match(r"^\d+\.\s*([^:|]+)", line)
+    if m:
+        return re.sub(r"\s+", " ", m.group(1)).strip()
+    m = re.match(r"^([가-힣A-Za-z0-9_ /]+)\s*[:：]", line)
+    if m:
+        return re.sub(r"\s+", " ", m.group(1)).strip()
+    return re.sub(r"\s+", " ", line[:30]).strip()
+
+
+def _extract_pct(line: str) -> float:
+    m = re.search(r"(-?\d+(?:\.\d+)?)\s*%", line)
+    return float(m.group(1)) if m else 0.0
+
+
+def _extract_curr_prev(line: str) -> Tuple[float, float]:
+    cur = 0.0
+    prev = 0.0
+    m_cur = re.search(r"(현재|current)\s*[:：]?\s*([0-9,.\-]+)", line, flags=re.I)
+    m_prev = re.search(r"(이전|prev|previous)\s*[:：]?\s*([0-9,.\-]+)", line, flags=re.I)
+    if m_cur:
+        cur = _safe_float(m_cur.group(2))
+    if m_prev:
+        prev = _safe_float(m_prev.group(2))
+    return cur, prev
+
+
+def _preprocess_report_data(title: str, html_content: str) -> Dict[str, Any]:
+    text = _strip_report_html_to_text(html_content)
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+
+    kpi_summary = []
+    growth_rates = []
+    segment_changes = []
+    numeric_values = []
+    ranked_values = []
+
+    for ln in lines:
+        nums = re.findall(r"-?\d[\d,]*(?:\.\d+)?", ln)
+        for n in nums:
+            numeric_values.append(_safe_float(n))
+
+        if re.search(r"매출|수익|사용자|세션|전환|revenue|users|session|conversion", ln, flags=re.I):
+            kpi_summary.append({
+                "kpi": _extract_kpi_name(ln),
+                "line": ln
+            })
+
+        if "%" in ln or re.search(r"증감|대비|change|delta", ln, flags=re.I):
+            pct = _extract_pct(ln)
+            cur, prev = _extract_curr_prev(ln)
+            if pct == 0.0 and cur > 0 and prev > 0:
+                pct = ((cur - prev) / prev) * 100 if prev else 0.0
+            growth_rates.append({
+                "metric": _extract_kpi_name(ln),
+                "current": cur if cur > 0 else None,
+                "prev": prev if prev > 0 else None,
+                "change_pct": round(pct, 1),
+                "line": ln
+            })
+
+        if re.match(r"^\d+\.\s", ln):
+            segment_changes.append({"rank_line": ln})
+            # 상위 항목 값 추출 (예: "1. ... 9,076,814원")
+            nums = re.findall(r"(-?\d[\d,]*(?:\.\d+)?)", ln)
+            if nums:
+                ranked_values.append(_safe_float(nums[-1]))
+
+    # 간단 이상치 탐지 (중앙값 기준 3배 이상)
+    anomalies = []
+    positives = [v for v in numeric_values if v > 0]
+    if positives:
+        mid = sorted(positives)[len(positives) // 2]
+        if mid > 0:
+            for v in positives:
+                if v >= mid * 3:
+                    anomalies.append({"type": "high_spike", "value": v})
+                elif v <= mid * 0.3:
+                    anomalies.append({"type": "low_drop", "value": v})
+            anomalies = anomalies[:5]
+
+    # 비교 기준 추정
+    comparison_basis = None
+    all_text = "\n".join(lines)
+    if "전월" in all_text:
+        comparison_basis = "전월 대비"
+    elif "전주" in all_text:
+        comparison_basis = "전주 대비"
+    elif "목표" in all_text:
+        comparison_basis = "목표 대비"
+    elif any(g.get("prev") for g in growth_rates):
+        comparison_basis = "이전값 대비"
+    elif ranked_values:
+        comparison_basis = "상위/하위 분포 대비"
+    else:
+        comparison_basis = "평균 대비"
+
+    # 구성비/집중도 계산
+    composition = {
+        "item_share_pct": [],
+        "top3_concentration_pct": 0.0,
+        "top5_concentration_pct": 0.0
+    }
+    total_ranked = sum(v for v in ranked_values if v > 0)
+    if total_ranked > 0:
+        sorted_vals = [v for v in ranked_values if v > 0]
+        composition["top3_concentration_pct"] = round(sum(sorted_vals[:3]) / total_ranked * 100, 1)
+        composition["top5_concentration_pct"] = round(sum(sorted_vals[:5]) / total_ranked * 100, 1)
+        for idx, v in enumerate(sorted_vals[:10], 1):
+            composition["item_share_pct"].append({
+                "rank": idx,
+                "value": v,
+                "share_pct": round(v / total_ranked * 100, 1)
+            })
+
+    # 코드 기반 리스크 탐지
+    risk_flags = []
+    top2_pct = round((sum([v for v in ranked_values[:2] if v > 0]) / total_ranked * 100), 1) if total_ranked > 0 else 0.0
+    if top2_pct > 50:
+        risk_flags.append({"risk": "상위 2개 항목 매출 비중 > 50%", "level": "high"})
+    if re.search(r"\(not set\)", all_text, flags=re.I):
+        risk_flags.append({"risk": "(not set) 값 존재 - 데이터 정합성 이슈 가능", "level": "high"})
+    if any(g.get("prev") in [None, 0] and g.get("current") not in [None, 0] for g in growth_rates):
+        risk_flags.append({"risk": "이전값 0/미존재로 비교 불가 항목 존재", "level": "medium"})
+
+    return {
+        "title": title,
+        "source_lines": lines[:300],
+        "kpi_summary": kpi_summary[:12],
+        "growth_rates": growth_rates[:12],
+        "segment_change_topn": segment_changes[:10],
+        "anomalies": anomalies,
+        "comparison_basis": comparison_basis,
+        "composition": composition,
+        "risk_flags": risk_flags
+    }
+
+
+def _build_report_planner(pre: Dict[str, Any]) -> Dict[str, Any]:
+    growth = pre.get("growth_rates", [])
+    seg = pre.get("segment_change_topn", [])
+    anomalies = pre.get("anomalies", [])
+
+    neg = [g for g in growth if g.get("change_pct", 0) < 0]
+    if len(neg) >= 2 or len(anomalies) >= 2:
+        analysis_type = "risk"
+    elif seg:
+        analysis_type = "segment"
+    else:
+        analysis_type = "trend"
+
+    core_kpis = []
+    for k in pre.get("kpi_summary", []):
+        name = k.get("kpi", "").strip()
+        if name and name not in core_kpis:
+            core_kpis.append(name)
+        if len(core_kpis) >= 3:
+            break
+    if not core_kpis:
+        core_kpis = ["핵심 KPI 1", "핵심 KPI 2", "핵심 KPI 3"]
+
+    highlights = []
+    for g in sorted(growth, key=lambda x: abs(x.get("change_pct", 0)), reverse=True)[:3]:
+        sign = "증가" if g.get("change_pct", 0) >= 0 else "감소"
+        highlights.append(f"{g.get('metric','지표')} {abs(g.get('change_pct', 0)):.1f}% {sign}")
+    if not highlights and pre.get("kpi_summary"):
+        highlights = [pre["kpi_summary"][0]["line"][:80]]
+
+    if analysis_type == "risk":
+        questions = [
+            "감소폭이 가장 큰 KPI는 무엇인가?",
+            "어떤 세그먼트/채널이 하락을 주도했는가?",
+            "즉시 실행 가능한 리스크 완화 액션은 무엇인가?"
+        ]
+    elif analysis_type == "segment":
+        questions = [
+            "증감이 가장 큰 세그먼트는 어디인가?",
+            "세그먼트 변화의 원인이 되는 유입/디바이스 요인은 무엇인가?",
+            "우선순위가 높은 타겟 액션은 무엇인가?"
+        ]
+    else:
+        questions = [
+            "핵심 KPI의 최근 추이는 어떤가?",
+            "증감률 기준으로 주목할 지표는 무엇인가?",
+            "다음 기간 개선을 위한 액션은 무엇인가?"
+        ]
+
+    return {
+        "analysis_type": analysis_type,
+        "core_kpis": core_kpis[:3],
+        "highlight_points": highlights[:3],
+        "key_questions": questions[:3],
+        "comparison_basis": pre.get("comparison_basis", "평균 대비")
+    }
+
+
+def _build_report_object(pre: Dict[str, Any], planner: Dict[str, Any]) -> Dict[str, Any]:
+    growth = pre.get("growth_rates", [])
+    analysis_type = planner.get("analysis_type", "trend")
+    comp = pre.get("composition", {}) or {}
+
+    executive_summary = list(planner.get("highlight_points", []))[:3]
+    if comp.get("top3_concentration_pct", 0) > 0:
+        executive_summary.insert(0, f"상위 3개 항목 집중도는 {comp.get('top3_concentration_pct', 0):.1f}%입니다.")
+    while len(executive_summary) < 3:
+        executive_summary.append("추가 분석 포인트를 확인 중입니다.")
+    executive_summary = executive_summary[:3]
+
+    trend_analysis = []
+    for g in growth[:5]:
+        trend_analysis.append({
+            "metric": g.get("metric", "metric"),
+            "current": g.get("current"),
+            "prev": g.get("prev"),
+            "change_pct": g.get("change_pct", 0.0)
+        })
+
+    hypotheses = []
+    if analysis_type == "risk":
+        hypotheses = [
+            "유입 품질 저하 또는 캠페인 예산 변화 영향 가능성",
+            "랜딩/퍼널 단계 이탈 증가 가능성",
+            "세그먼트 믹스 변화로 KPI 왜곡 가능성"
+        ]
+    elif analysis_type == "segment":
+        hypotheses = [
+            "특정 세그먼트의 채널 효율 변화 가능성",
+            "디바이스/랜딩페이지 조합 차이 영향 가능성",
+            "프로모션 노출 편차 영향 가능성"
+        ]
+    else:
+        hypotheses = [
+            "시즌성/요일 효과가 KPI에 반영되었을 가능성",
+            "상위 채널 기여도 변화 가능성",
+            "콘텐츠/상품 믹스 변화 영향 가능성"
+        ]
+
+    risks = []
+    for rf in pre.get("risk_flags", [])[:3]:
+        if isinstance(rf, dict):
+            risks.append({"risk": str(rf.get("risk", "")), "level": str(rf.get("level", "medium"))})
+    for g in growth:
+        pct = g.get("change_pct", 0)
+        if pct <= -15:
+            risks.append({"risk": f"{g.get('metric','지표')} 하락 지속 가능성", "level": "high"})
+        elif pct <= -7:
+            risks.append({"risk": f"{g.get('metric','지표')} 변동성 확대 가능성", "level": "medium"})
+        if len(risks) >= 3:
+            break
+    if not risks:
+        risks = [{"risk": "단기 급락 리스크는 제한적이나 모니터링 필요", "level": "low"}]
+
+    actions = [
+        {"action": "하락 KPI 원인 분해(채널/디바이스/랜딩)", "priority": "high", "owner_suggestion": "Data", "deadline_days": 2},
+        {"action": "상위 영향 세그먼트 타겟 재점검", "priority": "high", "owner_suggestion": "Marketing", "deadline_days": 5},
+        {"action": "랜딩/퍼널 전환 저하 구간 A/B 테스트", "priority": "medium", "owner_suggestion": "Dev", "deadline_days": 7}
+    ]
+    if analysis_type == "trend":
+        actions[0]["priority"] = "medium"
+    actions = actions[:5]
+
+    return {
+        "executive_summary": executive_summary,
+        "trend_analysis": trend_analysis,
+        "hypotheses": hypotheses[:3],
+        "risks": risks[:3],
+        "actions": actions
+    }
+
+
+def _extract_json_candidate(text: str) -> str:
+    t = (text or "").strip()
+    if "```" in t:
+        t = re.sub(r"```json|```", "", t).strip()
+    # 가장 바깥 JSON 후보 추출
+    start_obj = t.find("{")
+    start_arr = t.find("[")
+    starts = [x for x in [start_obj, start_arr] if x >= 0]
+    if not starts:
+        return t
+    start = min(starts)
+    end_obj = t.rfind("}")
+    end_arr = t.rfind("]")
+    end = max(end_obj, end_arr)
+    if end >= start:
+        return t[start:end + 1]
+    return t
+
+
+def _llm_json_response(system_prompt: str, user_prompt: str, temperature: float = 0.0):
+    try:
+        import openai
+        res = openai.ChatCompletion.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature=temperature
+        )
+        content = res["choices"][0]["message"]["content"]
+        parsed = json.loads(_extract_json_candidate(content))
+        return parsed
+    except Exception as e:
+        logging.warning(f"[Notion LLM JSON] fallback due to: {e}")
+        return None
+
+
+def _llm_planner(pre: Dict[str, Any]) -> Dict[str, Any]:
+    schema_hint = {
+        "analysis_type": "trend|risk|segment",
+        "core_kpis": ["string", "string", "string"],
+        "highlight_points": ["string", "string", "string"],
+        "key_questions": ["string", "string", "string"]
+    }
+    system_prompt = (
+        "You are a planning model. Return only valid JSON. "
+        "No markdown. No explanations. Keep Korean phrasing where possible."
+    )
+    user_prompt = (
+        "다음 전처리 JSON을 보고 분석 계획 JSON을 생성하세요.\n"
+        f"필수 스키마:\n{json.dumps(schema_hint, ensure_ascii=False)}\n"
+        "제약: 모든 리스트 길이는 정확히 3.\n"
+        f"입력:\n{json.dumps(pre, ensure_ascii=False)}"
+    )
+    out = _llm_json_response(system_prompt, user_prompt, temperature=0.0)
+    if not isinstance(out, dict):
+        return _build_report_planner(pre)
+    # 최소 보정
+    out.setdefault("analysis_type", "trend")
+    out["analysis_type"] = out["analysis_type"] if out["analysis_type"] in ["trend", "risk", "segment"] else "trend"
+    for k in ["core_kpis", "highlight_points", "key_questions"]:
+        v = out.get(k, [])
+        if not isinstance(v, list):
+            v = []
+        v = [str(x) for x in v[:3]]
+        while len(v) < 3:
+            v.append("추가 항목 필요")
+        out[k] = v
+    return out
+
+
+def _llm_writer(pre: Dict[str, Any], planner: Dict[str, Any]) -> Dict[str, Any]:
+    schema_hint = {
+        "executive_summary": ["string", "string", "string"],
+        "trend_analysis": [
+            {"metric": "string", "current": 0, "prev": 0, "change_pct": 0.0}
+        ],
+        "hypotheses": ["string", "string", "string"],
+        "risks": [{"risk": "string", "level": "high|medium|low"}],
+        "actions": [{"action": "string", "priority": "high|medium|low", "owner_suggestion": "string", "deadline_days": 7}]
+    }
+    system_prompt = (
+        "You are a report writer model. Fill data only. Return only valid JSON object."
+    )
+    user_prompt = (
+        "아래 planner + preprocessed를 기반으로 리포트 객체 JSON을 작성하세요.\n"
+        f"필수 스키마:\n{json.dumps(schema_hint, ensure_ascii=False)}\n"
+        "제약: executive_summary 정확히 3개, hypotheses 정확히 3개, actions 최대 5개, risks 최대 3개.\n"
+        f"planner:\n{json.dumps(planner, ensure_ascii=False)}\n"
+        f"preprocessed:\n{json.dumps(pre, ensure_ascii=False)}"
+    )
+    out = _llm_json_response(system_prompt, user_prompt, temperature=0.1)
+    if not isinstance(out, dict):
+        return _build_report_object(pre, planner)
+    return out
+
+
+def _validate_report_object(obj: Dict[str, Any]) -> Tuple[bool, List[str]]:
+    errs = []
+    required = ["executive_summary", "trend_analysis", "hypotheses", "risks", "actions"]
+    for k in required:
+        if k not in obj:
+            errs.append(f"missing:{k}")
+        elif not isinstance(obj[k], list):
+            errs.append(f"type:{k}:list")
+
+    if isinstance(obj.get("executive_summary"), list) and len(obj["executive_summary"]) != 3:
+        errs.append("len:executive_summary:3")
+    if isinstance(obj.get("actions"), list) and len(obj["actions"]) > 5:
+        errs.append("len:actions:max5")
+    if isinstance(obj.get("risks"), list) and len(obj["risks"]) > 3:
+        errs.append("len:risks:max3")
+    return len(errs) == 0, errs
+
+
+def _repair_report_object(obj: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(obj, dict):
+        obj = {}
+    obj.setdefault("executive_summary", [])
+    obj.setdefault("trend_analysis", [])
+    obj.setdefault("hypotheses", [])
+    obj.setdefault("risks", [])
+    obj.setdefault("actions", [])
+
+    if not isinstance(obj["executive_summary"], list):
+        obj["executive_summary"] = []
+    while len(obj["executive_summary"]) < 3:
+        obj["executive_summary"].append("추가 요약 포인트를 수집 중입니다.")
+    obj["executive_summary"] = [str(x) for x in obj["executive_summary"][:3]]
+
+    obj["trend_analysis"] = obj["trend_analysis"] if isinstance(obj["trend_analysis"], list) else []
+    obj["hypotheses"] = [str(x) for x in (obj["hypotheses"] if isinstance(obj["hypotheses"], list) else [])][:3]
+
+    if not isinstance(obj["risks"], list):
+        obj["risks"] = []
+    normalized_risks = []
+    for r in obj["risks"][:3]:
+        if isinstance(r, dict):
+            normalized_risks.append({
+                "risk": str(r.get("risk", "리스크 점검 필요")),
+                "level": str(r.get("level", "medium"))
+            })
+        else:
+            normalized_risks.append({"risk": str(r), "level": "medium"})
+    if not normalized_risks:
+        normalized_risks = [{"risk": "리스크 정보 부족", "level": "low"}]
+    obj["risks"] = normalized_risks
+
+    if not isinstance(obj["actions"], list):
+        obj["actions"] = []
+    normalized_actions = []
+    for a in obj["actions"][:5]:
+        if isinstance(a, dict):
+            normalized_actions.append({
+                "action": str(a.get("action", "액션 정의 필요")),
+                "priority": str(a.get("priority", "medium")),
+                "owner_suggestion": str(a.get("owner_suggestion", "TBD")),
+                "deadline_days": int(_safe_float(a.get("deadline_days", 7)) or 7)
+            })
+    if not normalized_actions:
+        normalized_actions = [{
+            "action": "핵심 KPI 하락 원인 재분석",
+            "priority": "high",
+            "owner_suggestion": "Data",
+            "deadline_days": 3
+        }]
+    obj["actions"] = normalized_actions
+    return obj
+
+
+def _report_object_to_notion_markdown(
+    title: str,
+    pre: Dict[str, Any],
+    planner: Dict[str, Any],
+    report_obj: Dict[str, Any]
+) -> str:
+    doc_title = title.strip() if title else "Untitled Report"
+    today = pd.Timestamp.now().strftime('%Y-%m-%d')
+
+    lines = [f"# {doc_title}", ""]
+    lines += [
+        "## 1) 리포트 아카이브",
+        f"- 작성일: {today}",
+        "- 작성자: ",
+        "- 데이터 소스: GA4 / File / Mixed",
+        "- 분석 기간: ",
+        "- 리포트 버전: v2 (planner/writer-json)",
+        ""
+    ]
+
+    lines += ["## 2) KPI 변화 추적"]
+    for g in pre.get("growth_rates", [])[:8]:
+        cp = g.get("change_pct", 0.0)
+        metric = g.get("metric", "metric")
+        lines.append(f"- {metric}: {cp:+.1f}%")
+    if len(lines) > 0 and lines[-1] == "## 2) KPI 변화 추적":
+        lines.pop()  # 데이터 없으면 섹션 제외
+    else:
+        lines.append(f"- 비교 기준: {planner.get('comparison_basis', pre.get('comparison_basis', '평균 대비'))}")
+    lines.append("")
+
+    # 구성비 섹션
+    comp = pre.get("composition", {}) or {}
+    top3 = comp.get("top3_concentration_pct", 0.0)
+    top5 = comp.get("top5_concentration_pct", 0.0)
+    if top3 > 0 or top5 > 0:
+        lines += ["## 3) 구성비/집중도"]
+        lines.append(f"- 상위 3개 집중도: {top3:.1f}%")
+        lines.append(f"- 상위 5개 집중도: {top5:.1f}%")
+        item_shares = comp.get("item_share_pct", [])[:5]
+        for it in item_shares:
+            lines.append(f"- TOP {it.get('rank')}: {it.get('share_pct', 0):.1f}%")
+        lines.append("")
+
+    # 리스크 탐지 섹션
+    risk_flags = pre.get("risk_flags", [])
+    if risk_flags:
+        lines += ["## 4) 집중 리스크 탐지(코드 기반)"]
+        for r in risk_flags[:5]:
+            if isinstance(r, dict):
+                lines.append(f"- [{str(r.get('level','medium')).upper()}] {r.get('risk','')}")
+        lines.append("")
+
+    lines += [
+        "## 5) 판단 기록 (Decision Log)",
+        "| 날짜 | 관찰/근거 | 판단 | 영향도 | 담당 |",
+        "|---|---|---|---|---|",
+        "|  |  |  |  |  |",
+        ""
+    ]
+
+    lines += [
+        "## 6) 실행 관리 (Action Tracker)",
+        "| 실행 항목 | 목적 KPI | 오너 | 기한 | 상태 | 결과 |",
+        "|---|---|---|---|---|---|",
+    ]
+    for a in report_obj.get("actions", [])[:5]:
+        lines.append(
+            f"| {a.get('action','')} | {', '.join(planner.get('core_kpis', [])[:2])} | {a.get('owner_suggestion','')} | D+{a.get('deadline_days',7)} | Todo |  |"
+        )
+    lines.append("")
+
+    lines += ["## 7) Executive Summary"]
+    for s in report_obj.get("executive_summary", [])[:3]:
+        lines.append(f"- {s}")
+    lines.append("")
+
+    if report_obj.get("trend_analysis"):
+        lines += ["## 8) Trend Analysis"]
+        lines += ["| Metric | Current | Prev | Change % |", "|---|---:|---:|---:|"]
+        for t in report_obj.get("trend_analysis", [])[:10]:
+            cur = "" if t.get("current") is None else f"{_safe_float(t.get('current')):,.0f}"
+            prev = "" if t.get("prev") is None else f"{_safe_float(t.get('prev')):,.0f}"
+            chg = f"{_safe_float(t.get('change_pct')):+.1f}%"
+            lines.append(f"| {t.get('metric','')} | {cur} | {prev} | {chg} |")
+        lines.append("")
+
+    if report_obj.get("hypotheses"):
+        lines += ["## 9) Hypotheses"]
+        for h in report_obj.get("hypotheses", [])[:3]:
+            lines.append(f"1. {h}")
+        lines.append("")
+
+    if report_obj.get("risks"):
+        lines += ["## 10) Risks"]
+        for r in report_obj.get("risks", [])[:3]:
+            lines.append(f"- [{str(r.get('level','medium')).upper()}] {r.get('risk','')}")
+        lines.append("")
+
+    lines += ["## 11) Planner 메타"]
+    lines.append(f"- 분석 타입: {planner.get('analysis_type','trend')}")
+    lines.append(f"- 핵심 KPI: {', '.join(planner.get('core_kpis', []))}")
+    lines.append(f"- 비교 기준: {planner.get('comparison_basis', pre.get('comparison_basis', '평균 대비'))}")
+    lines.append("- 리포트 질문 3개:")
+    for q in planner.get("key_questions", [])[:3]:
+        lines.append(f"  - {q}")
+    lines.append("")
+
+    if pre.get("source_lines"):
+        lines += ["## 12) 원본 분석 스냅샷"]
+        for ln in pre.get("source_lines", [])[:30]:
+            lines.append(f"- {ln}")
+    return "\n".join(lines).strip() + "\n"
+
+
+def _build_notion_export_payload(title: str, html_content: str) -> Dict[str, Any]:
+    pre = _preprocess_report_data(title, html_content)
+    planner = _llm_planner(pre)
+    report_obj = _llm_writer(pre, planner)
+    ok, errs = _validate_report_object(report_obj)
+    if not ok:
+        report_obj = _repair_report_object(report_obj)
+        ok2, errs2 = _validate_report_object(report_obj)
+        errs = errs + ([] if ok2 else errs2)
+
+    markdown = _report_object_to_notion_markdown(title, pre, planner, report_obj)
+    return {
+        "preprocessed": pre,
+        "planner": planner,
+        "report_object": report_obj,
+        "validation_errors": errs,
+        "markdown": markdown
+    }
+
 app = Flask(__name__)
-app.secret_key = os.urandom(24)
-UPLOAD_FOLDER = 'uploaded_files'
+flask_env = os.getenv("FLASK_ENV", "development").lower()
+secret_key = os.getenv("FLASK_SECRET_KEY", "").strip()
+if flask_env == "production" and not secret_key:
+    raise RuntimeError("FLASK_SECRET_KEY must be set in production.")
+app.secret_key = secret_key or os.urandom(24)
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SECURE"] = _env_bool("SESSION_COOKIE_SECURE", flask_env == "production")
+app.config["SESSION_COOKIE_SAMESITE"] = os.getenv("SESSION_COOKIE_SAMESITE", "Lax")
+app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(hours=int(os.getenv("SESSION_LIFETIME_HOURS", "24")))
+app.config["MAX_CONTENT_LENGTH"] = int(os.getenv("MAX_CONTENT_LENGTH_MB", "50")) * 1024 * 1024
+UPLOAD_FOLDER = os.getenv("UPLOAD_FOLDER", "uploaded_files")
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+try:
+    retention_days = int(os.getenv("LEARNING_RETENTION_DAYS", "180"))
+    deleted = DBManager.prune_old_interactions(retention_days=max(1, retention_days))
+    if deleted:
+        logging.info(f"[Startup] Pruned old interaction logs: {deleted} rows")
+except Exception as e:
+    logging.warning(f"[Startup] Failed to prune old interaction logs: {e}")
+
+
+@app.before_request
+def _set_session_permanent():
+    session.permanent = True
 
 # 통합 데이터셋 저장용 변수
 integrated_datasets = {}
+
+
+@app.route('/healthz', methods=['GET'])
+def healthz():
+    return jsonify({"ok": True, "service": "my_project", "env": flask_env}), 200
 
 @app.route('/upload', methods=['POST'])
 def upload_file():
@@ -62,13 +842,12 @@ def upload_file():
 
 
 
-os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
+if flask_env != "production":
+    os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")
 
-with open("client_secret.json", "r") as f:
-    google_creds = json.loads(f.read())
-
-GOOGLE_CLIENT_ID = google_creds["web"]["client_id"]
-GOOGLE_CLIENT_SECRET = google_creds["web"]["client_secret"]
+google_creds = _load_google_web_creds()
+GOOGLE_CLIENT_ID = google_creds["client_id"]
+GOOGLE_CLIENT_SECRET = google_creds["client_secret"]
 GOOGLE_DISCOVERY_URL = "https://accounts.google.com/.well-known/openid-configuration"
 
 client = WebApplicationClient(GOOGLE_CLIENT_ID)
@@ -190,6 +969,41 @@ def refresh_credentials(credentials):
     if credentials.expired and credentials.refresh_token:
         credentials.refresh(request_)
     return credentials
+
+def get_traffic_data(dimensions, metrics, start_date, end_date, property_id):
+    if 'credentials' not in session:
+        raise ValueError("GA4 credentials not found in session")
+
+    credentials = google.oauth2.credentials.Credentials(**session['credentials'])
+    credentials = refresh_credentials(credentials)
+    session['credentials']['token'] = credentials.token
+
+    client = BetaAnalyticsDataClient(credentials=credentials)
+    req = RunReportRequest(
+        property=f"properties/{property_id}",
+        dimensions=[Dimension(name=d["name"]) for d in dimensions],
+        metrics=[Metric(name=m["name"]) for m in metrics],
+        date_ranges=[DateRange(start_date=start_date, end_date=end_date)],
+    )
+    resp = client.run_report(req)
+
+    rows = []
+    for row in resp.rows:
+        item = {}
+        for i, d in enumerate(dimensions):
+            item[d["name"]] = row.dimension_values[i].value
+        for i, m in enumerate(metrics):
+            raw = row.metric_values[i].value
+            try:
+                item[m["name"]] = float(raw)
+            except (TypeError, ValueError):
+                item[m["name"]] = raw
+        rows.append(item)
+
+    if not rows:
+        columns = [d["name"] for d in dimensions] + [m["name"] for m in metrics]
+        return pd.DataFrame(columns=columns)
+    return pd.DataFrame(rows)
 
 @app.route("/list_all")
 def list_all():
@@ -631,10 +1445,19 @@ def get_preprocessed_data():
 def ask_question():
     try:
         data = request.get_json()
-        question = data.get('question')
+        question = (data.get('question') or "").strip()
 
         if not question:
             return jsonify({"error": "Question is required"}), 400
+
+        # 추천 질문 번호 선택 지원 (예: "1번", "2")
+        m = re.match(r"^\s*(\d+)\s*번?\s*$", question)
+        if m:
+            idx = int(m.group(1)) - 1
+            suggestions = session.get("last_followup_suggestions") or []
+            if 0 <= idx < len(suggestions):
+                question = suggestions[idx]
+                logging.info(f"[Ask] Followup option selected: {m.group(1)} -> {question}")
 
         property_id = session.get("property_id")
         # 🔥 파일 경로 세션 연동 (전처리 우선)
@@ -665,6 +1488,37 @@ def ask_question():
 
         # [P0] Session Save
         session['last_response'] = response
+
+        # 후속 질문 추천 세션 저장
+        followups = []
+        route = None
+        body = response
+        if isinstance(response, dict):
+            route = response.get("route")
+            body = response.get("response") if isinstance(response.get("response"), dict) else response
+            if isinstance(body, dict):
+                f = body.get("followup_suggestions")
+                if isinstance(f, list):
+                    followups = [str(x) for x in f if str(x).strip()]
+        session["last_followup_suggestions"] = followups
+
+        # 학습/평가용 인터랙션 로그 저장
+        if isinstance(body, dict):
+            plot_data = body.get("plot_data")
+            has_plot = isinstance(plot_data, dict) and bool(plot_data.get("labels")) and bool(plot_data.get("series"))
+            has_raw_data = isinstance(body.get("raw_data"), list) and len(body.get("raw_data")) > 0
+            msg = str(body.get("message", ""))
+            abstained = any(k in msg for k in ["없습니다", "모릅니다", "알 수 없습니다", "확인할 수 없습니다"])
+            DBManager.log_interaction(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                route=route or "unknown",
+                question=question,
+                response=body,
+                has_plot=has_plot,
+                has_raw_data=has_raw_data,
+                abstained=abstained
+            )
 
         # [P0] Sanitize Response (NaN -> None)
         sanitized_response = sanitize(response)
@@ -718,6 +1572,190 @@ def get_report(report_id):
             return jsonify({"error": "Report not found"}), 404
     except Exception as e:
         logging.error(f"Error getting report: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/export_report/notion', methods=['POST'])
+def export_report_notion():
+    """
+    Notion import-friendly Markdown export.
+    Input:
+      - report_id (optional): load saved report
+      - title/content (optional): export current report draft
+    """
+    try:
+        data = request.get_json() or {}
+        report_id = data.get("report_id")
+        title = data.get("title", "Untitled Report")
+        content = data.get("content", "")
+
+        if report_id:
+            report = DBManager.get_report_by_id(int(report_id))
+            if not report:
+                return jsonify({"error": "Report not found"}), 404
+            title = report.get("title", title)
+            content = report.get("content", content)
+
+        if not content:
+            return jsonify({"error": "Report content is required"}), 400
+        if not isinstance(content, str):
+            content = json.dumps(content, ensure_ascii=False)
+
+        # 1차 구현: 전처리 -> planner -> writer(report object) -> validation -> notion 템플릿 렌더링
+        payload = _build_notion_export_payload(title, content)
+        markdown = payload["markdown"]
+        filename = re.sub(r"[^\w\-. ]", "_", title).strip() or "report"
+        filename = f"{filename}.md"
+
+        return jsonify({
+            "success": True,
+            "format": "notion_markdown",
+            "filename": filename,
+            "markdown": markdown,
+            "report_object": payload.get("report_object", {}),
+            "planner": payload.get("planner", {}),
+            "preprocessed": payload.get("preprocessed", {}),
+            "validation_errors": payload.get("validation_errors", [])
+        })
+    except Exception as e:
+        logging.error(f"Error exporting notion report: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/learning_status', methods=['GET'])
+def learning_status():
+    try:
+        user_id = session.get("user_id", "anonymous")
+        days = request.args.get("days", default=30, type=int)
+        summary = DBManager.get_learning_status(user_id=user_id, days=max(1, min(days, 365)))
+        return jsonify({"success": True, "user_id": user_id, "days": max(1, min(days, 365)), "summary": summary})
+    except Exception as e:
+        logging.error(f"Error getting learning status: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/learning_samples', methods=['GET'])
+def learning_samples():
+    try:
+        user_id = session.get("user_id", "anonymous")
+        limit = request.args.get("limit", default=50, type=int)
+        samples = DBManager.get_recent_learning_samples(user_id=user_id, limit=limit)
+        return jsonify({"success": True, "user_id": user_id, "count": len(samples), "samples": samples})
+    except Exception as e:
+        logging.error(f"Error getting learning samples: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/matching_status', methods=['GET'])
+def matching_status():
+    try:
+        user_id = session.get("user_id", "anonymous")
+        days = request.args.get("days", default=30, type=int)
+        summary = DBManager.get_matching_status(user_id=user_id, days=max(1, min(days, 365)))
+        return jsonify({"success": True, "user_id": user_id, "days": max(1, min(days, 365)), "summary": summary})
+    except Exception as e:
+        logging.error(f"Error getting matching status: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/admin/token_status', methods=['GET'])
+def admin_token_status():
+    if not _require_admin_token():
+        return jsonify({"error": "unauthorized"}), 401
+    try:
+        status = {
+            "flask_env": flask_env,
+            "flask_secret_configured": bool(os.getenv("FLASK_SECRET_KEY", "").strip()),
+            "openai_api_key_configured": bool(os.getenv("OPENAI_API_KEY", "").strip()),
+            "admin_api_token_configured": bool(os.getenv("ADMIN_API_TOKEN", "").strip()),
+            "google_client_id_configured": bool(GOOGLE_CLIENT_ID),
+            "google_client_secret_configured": bool(GOOGLE_CLIENT_SECRET),
+            "session_cookie_secure": bool(app.config.get("SESSION_COOKIE_SECURE")),
+            "session_cookie_samesite": app.config.get("SESSION_COOKIE_SAMESITE"),
+        }
+        return jsonify({"success": True, "status": status})
+    except Exception as e:
+        logging.error(f"Error getting token status: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/admin/export_training_jsonl', methods=['GET'])
+def admin_export_training_jsonl():
+    if not _require_admin_token():
+        return jsonify({"error": "unauthorized"}), 401
+    try:
+        days = request.args.get("days", default=30, type=int)
+        limit = request.args.get("limit", default=int(os.getenv("TRAINING_EXPORT_MAX_ROWS", "5000")), type=int)
+        include_abstained = request.args.get("include_abstained", default=0, type=int) == 1
+        label_filter = request.args.get("label_filter", default=os.getenv("TRAINING_EXPORT_LABEL_FILTER", "good"), type=str)
+        include_unlabeled = request.args.get("include_unlabeled", default=0, type=int) == 1
+        user_id = request.args.get("user_id", default=None, type=str)
+        examples = DBManager.export_training_examples(
+            user_id=user_id,
+            days=max(1, min(days, 3650)),
+            limit=max(1, min(limit, 100000)),
+            include_abstained=include_abstained,
+            label_filter=label_filter,
+            include_unlabeled=include_unlabeled
+        )
+        lines = [json.dumps(x, ensure_ascii=False) for x in examples]
+        payload = "\n".join(lines) + ("\n" if lines else "")
+        filename = f"training_examples_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
+        return Response(
+            payload,
+            mimetype="application/x-ndjson",
+            headers={"Content-Disposition": f"attachment; filename={filename}"}
+        )
+    except Exception as e:
+        logging.error(f"Error exporting training jsonl: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/admin/label_status', methods=['GET'])
+def admin_label_status():
+    if not _require_admin_token():
+        return jsonify({"error": "unauthorized"}), 401
+    try:
+        days = request.args.get("days", default=30, type=int)
+        user_id = request.args.get("user_id", default=None, type=str)
+        summary = DBManager.get_label_status(user_id=user_id, days=max(1, min(days, 3650)))
+        return jsonify({"success": True, "days": max(1, min(days, 3650)), "summary": summary})
+    except Exception as e:
+        logging.error(f"Error getting label status: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/admin/label_interaction', methods=['POST'])
+def admin_label_interaction():
+    if not _require_admin_token():
+        return jsonify({"error": "unauthorized"}), 401
+    try:
+        body = request.get_json(silent=True) or {}
+        interaction_id = body.get("interaction_id")
+        label = body.get("label")
+        note = body.get("note", "")
+        if not interaction_id or not label:
+            return jsonify({"error": "interaction_id and label are required"}), 400
+        ok = DBManager.set_interaction_label(interaction_id=interaction_id, label=label, note=note)
+        if not ok:
+            return jsonify({"error": "failed to set label"}), 400
+        return jsonify({"success": True, "interaction_id": int(interaction_id), "label": str(label).lower()})
+    except Exception as e:
+        logging.error(f"Error labeling interaction: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/admin/prune_learning_data', methods=['POST'])
+def admin_prune_learning_data():
+    if not _require_admin_token():
+        return jsonify({"error": "unauthorized"}), 401
+    try:
+        body = request.get_json(silent=True) or {}
+        retention_days = int(body.get("retention_days") or os.getenv("LEARNING_RETENTION_DAYS", "180"))
+        deleted = DBManager.prune_old_interactions(retention_days=max(1, retention_days))
+        return jsonify({"success": True, "deleted_rows": deleted, "retention_days": max(1, retention_days)})
+    except Exception as e:
+        logging.error(f"Error pruning learning data: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
 # [PHASE 2] Block Editing API
@@ -934,5 +1972,6 @@ def list_preprocessed_data():
     return jsonify(files)
 
 if __name__ == "__main__":
-    app.run(debug=True, host='0.0.0.0', port=5001)
-
+    debug_mode = os.getenv("FLASK_DEBUG", "0") == "1"
+    port = int(os.getenv("PORT", "5001"))
+    app.run(debug=debug_mode, host='0.0.0.0', port=port)

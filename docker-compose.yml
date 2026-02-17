@@ -1,0 +1,24 @@
+version: "3.9"
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: my_project_app
+    ports:
+      - "5001:5001"
+    env_file:
+      - .env
+    environment:
+      FLASK_ENV: production
+      FLASK_DEBUG: "0"
+      PORT: "5001"
+    volumes:
+      # Keep runtime state for test/prod-like verification
+      - ./sqlite.db:/app/sqlite.db
+      - ./uploaded_files:/app/uploaded_files
+      - ./flask_session:/app/flask_session
+      # Optional: uncomment if you use file-based Google OAuth credentials
+      # - ./client_secret.json:/app/client_secret.json:ro
+    restart: unless-stopped

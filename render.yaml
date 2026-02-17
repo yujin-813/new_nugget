@@ -1,0 +1,32 @@
+services:
+  - type: web
+    name: my-project-app
+    env: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    autoDeploy: true
+    healthCheckPath: /healthz
+    envVars:
+      - key: FLASK_ENV
+        value: production
+      - key: FLASK_DEBUG
+        value: "0"
+      - key: PORT
+        value: "5001"
+      - key: SESSION_COOKIE_SECURE
+        value: "1"
+      - key: SESSION_COOKIE_SAMESITE
+        value: Lax
+      - key: SESSION_LIFETIME_HOURS
+        value: "24"
+      - key: LEARNING_RETENTION_DAYS
+        value: "180"
+      - key: TRAINING_EXPORT_LABEL_FILTER
+        value: good
+      # Set these in Render dashboard as secret env vars:
+      # FLASK_SECRET_KEY, ADMIN_API_TOKEN, OPENAI_API_KEY,
+      # GOOGLE_OAUTH_CLIENT_JSON (or GOOGLE_OAUTH_CLIENT_JSON_BASE64)
+    disk:
+      name: app-data
+      mountPath: /var/data
+      sizeGB: 1

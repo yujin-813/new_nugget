@@ -91,11 +91,55 @@ class GA4Pipeline:
             dimension_candidates = extraction_result["dimension_candidates"]
             date_range = extraction_result["date_range"]
             modifiers = extraction_result["modifiers"]
+            matching_debug = extraction_result.get("matching_debug", {})
             
             logging.info(f"[Pipeline] Intent: {intent}")
             logging.info(f"[Pipeline] Metric candidates: {len(metric_candidates)}")
             logging.info(f"[Pipeline] Dimension candidates: {len(dimension_candidates)}")
             logging.info(f"[Pipeline] Modifiers: {modifiers}")
+
+            q = (question or "").lower()
+            is_period_inquiry = any(k in q for k in [
+                "언제부터", "언제까지", "기간", "몇일부터", "몇일", "from", "to"
+            ])
+            # 지표 없이 날짜 확인만 묻는 질문은 직전/파싱 기간을 바로 응답
+            if is_period_inquiry and not metric_candidates:
+                s = date_range.get("start_date") if isinstance(date_range, dict) else None
+                e = date_range.get("end_date") if isinstance(date_range, dict) else None
+                if not s or not e:
+                    if last_state:
+                        s = last_state.get("start_date")
+                        e = last_state.get("end_date")
+                if s and e:
+                    return {
+                        "status": "ok",
+                        "message": f"현재 분석 기준 기간은 **{s} ~ {e}** 입니다.",
+                        "account": property_id,
+                        "period": f"{s} ~ {e}",
+                        "blocks": [],
+                        "plot_data": [],
+                        "matching_debug": matching_debug
+                    }
+
+            # 매칭 실패 시 무리한 기본 지표 추론 대신 명시적으로 질의 보강 요청
+            top_score = metric_candidates[0].get("score", 0) if metric_candidates else 0
+            has_prev_metrics = bool(last_state and last_state.get("metrics"))
+            short_dimension_followup = (
+                len(q) <= 20 and
+                any(k in q for k in [
+                    "채널별", "디바이스별", "기기별", "랜딩페이지", "소스별", "매체별", "분해",
+                    "해외", "국내", "국가", "유형", "카테고리", "프로그램",
+                    "메뉴명", "후원명", "묶어서", "전체", "스크롤", "페이지별", "click", "클릭"
+                ])
+            )
+            if (not metric_candidates and not short_dimension_followup) or (not has_prev_metrics and top_score < 0.55):
+                return {
+                    "status": "clarify",
+                    "message": "질문에서 매칭 가능한 지표를 찾지 못했습니다. 사용 가능한 지표명(예: 활성 사용자, 세션, 구매 수익, 상품 수익)으로 다시 질문해 주세요.",
+                    "blocks": [],
+                    "plot_data": [],
+                    "matching_debug": matching_debug
+                }
             
             # ================================================================
             # STEP 3: Build Execution Plan
@@ -128,14 +172,23 @@ class GA4Pipeline:
                 execution_plan=execution_plan,
                 property_id=property_id
             )
+            if isinstance(result, dict):
+                result["matching_debug"] = matching_debug
             
             # ================================================================
             # STEP 5: Save State
             # ================================================================
             if conversation_id and execution_plan.blocks:
+                anchor_block = None
+                for b in execution_plan.blocks:
+                    if b.block_type in ["breakdown", "breakdown_topn", "trend"] and b.dimensions:
+                        anchor_block = b
+                        break
+                if not anchor_block:
+                    anchor_block = execution_plan.blocks[0]
                 final_state = {
-                    "metrics": execution_plan.blocks[0].metrics,
-                    "dimensions": execution_plan.blocks[0].dimensions,
+                    "metrics": anchor_block.metrics,
+                    "dimensions": anchor_block.dimensions,
                     "start_date": execution_plan.start_date,
                     "end_date": execution_plan.end_date,
                     "intent": intent
@@ -156,5 +209,6 @@ class GA4Pipeline:
                 "status": "error",
                 "message": f"분석 중 오류 발생: {str(e)}",
                 "blocks": [],
-                "plot_data": []
+                "plot_data": [],
+                "matching_debug": {}
             }

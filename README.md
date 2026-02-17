@@ -154,6 +154,91 @@ my_project/
 - `itemRevenue`, `itemName` 등 item-scoped 분석 지원
 - "상품별" 키워드 감지 시 item-scoped metric 우선 선택
 
+## 릴리즈 스모크 체크
+
+릴리즈 전 아래 명령으로 핵심 질의 라우팅/플랜 회귀를 점검하세요.
+
+```bash
+python3 scripts/release_smoke.py
+```
+
+## 운영/배포 준비
+
+### 1) 토큰/세션 보안
+- `.env`에 `FLASK_SECRET_KEY`, `ADMIN_API_TOKEN` 설정
+- 운영 환경에서는 `SESSION_COOKIE_SECURE=1` 권장
+
+### 2) 학습 데이터 관리
+- 학습 JSONL 추출:
+```bash
+python3 scripts/export_training_data.py --days 30 --limit 5000 --label-filter good --output training_examples.jsonl
+```
+- 오래된 로그 정리:
+```bash
+python3 scripts/prune_learning_data.py --retention-days 180
+```
+
+### 3) 운영 API (Bearer 토큰 필요)
+- `GET /admin/token_status`
+- `GET /admin/label_status?days=30`
+- `POST /admin/label_interaction` with `{"interaction_id":123,"label":"good|bad|unknown","note":"..."}`
+- `GET /admin/export_training_jsonl?days=30&limit=5000&label_filter=good`
+- `POST /admin/prune_learning_data` with `{\"retention_days\":180}`
+
+## Docker 배포 테스트
+
+### 1) 환경 변수 준비
+```bash
+cp .env.example .env
+```
+- 필수: `FLASK_SECRET_KEY`, `ADMIN_API_TOKEN`
+- OAuth: `GOOGLE_CLIENT_SECRET_PATH=client_secret.json` 또는 `GOOGLE_OAUTH_CLIENT_JSON*`
+
+### 2) 빌드/실행
+```bash
+docker compose up --build -d
+```
+
+### 3) 상태 확인
+```bash
+docker compose ps
+docker compose logs -f app
+```
+
+### 4) 종료
+```bash
+docker compose down
+```
+
+## 공개 URL 배포 (Render)
+
+### 1) GitHub에 푸시
+```bash
+git add .
+git commit -m "deploy: add render config"
+git push
+```
+
+### 2) Render에서 배포
+1. Render Dashboard -> New + -> Blueprint
+2. GitHub repo 연결 후 `render.yaml` 선택
+3. 환경변수(Secret) 입력:
+   - `FLASK_SECRET_KEY`
+   - `ADMIN_API_TOKEN`
+   - `OPENAI_API_KEY` (사용 시)
+   - `GOOGLE_OAUTH_CLIENT_JSON` (권장) 또는 `GOOGLE_OAUTH_CLIENT_JSON_BASE64`
+   - `DB_PATH=/var/data/sqlite.db`
+   - `UPLOAD_FOLDER=/var/data/uploaded_files`
+4. Deploy 클릭
+
+### 3) URL 확인
+- 배포 완료 후 Render가 `https://<service-name>.onrender.com` URL을 발급
+- 헬스체크: `https://<service-name>.onrender.com/healthz`
+
+### 4) Google OAuth 리디렉션 URI 등록
+Google Cloud Console OAuth Client에 아래 URL 추가:
+- `https://<service-name>.onrender.com/oauth2callback`
+
 ## 라이선스
 
 MIT License

@@ -1,0 +1,17 @@
+.git
+.gitignore
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+.venv/
+venv/
+env/
+flask_session/
+uploaded_files/
+uploads/
+*.sqlite
+sqlite.db
+training_examples*.jsonl
+.DS_Store

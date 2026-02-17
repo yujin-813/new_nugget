@@ -3,10 +3,12 @@
 import requests
 import json
 import logging
+import os
 from ga4_metadata import GA4_METRICS, GA4_DIMENSIONS
 
-OLLAMA_URL = "http://localhost:11434/api/generate"
-MODEL = "qwen2.5:3b-instruct"
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api/generate")
+MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:3b-instruct")
+TIMEOUT_SEC = float(os.getenv("OLLAMA_TIMEOUT_SEC", "6"))
 
 
 def extract_intent(question: str):
@@ -47,7 +49,7 @@ def extract_intent(question: str):
     }
 
     try:
-        r = requests.post(OLLAMA_URL, json=payload, timeout=20)
+        r = requests.post(OLLAMA_URL, json=payload, timeout=TIMEOUT_SEC)
         r.raise_for_status()
         result = r.json().get("response", "{}")
         return json.loads(result)

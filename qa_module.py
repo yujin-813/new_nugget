@@ -623,36 +623,17 @@ class GA4AnalysisEngine:
 
     def _get_default_dimension_for_scope(self, scope):
         candidates = []
-
         for dim_name, meta in GA4_DIMENSIONS.items():
             cat = meta.get("category")
             dim_scope = meta.get("scope") or self.CATEGORY_TO_SCOPE.get(cat, "event")
+            if dim_scope == scope and meta.get("category") != "time":
+                candidates.append((dim_name, meta.get("priority", 0)))
 
-            if dim_scope == scope:
-                candidates.append(dim_name)
+        if not candidates:
+            return []
 
-        # 우선순위 규칙 (하드코딩된 지표명 X, dimension 정책만)
-        def _get_default_dimension_for_scope(self, scope):
-            candidates = []
-
-            for dim_name, meta in GA4_DIMENSIONS.items():
-                cat = meta.get("category")
-                dim_scope = meta.get("scope") or self.CATEGORY_TO_SCOPE.get(cat, "event")
-
-                if dim_scope == scope and meta.get("category") != "time":
-                    candidates.append((dim_name, meta.get("priority", 0)))
-
-            candidates.sort(key=lambda x: x[1], reverse=True)
-
-            return [{"name": candidates[0][0]}] if candidates else []
-
-
-        if scope in preferred:
-            for p in preferred[scope]:
-                if p in candidates:
-                    return [{"name": p}]
-
-        return [{"name": candidates[0]}] if candidates else []
+        candidates.sort(key=lambda x: x[1], reverse=True)
+        return [{"name": candidates[0][0]}]
 
 
     def _execute_multi_scope_queries(self, property_id, final_state, scope_groups):
@@ -1126,7 +1107,7 @@ def handle_question(
 
     route, is_explicit = QueryRouter.determine_route(question, conversation_id)
 
-    prev_context = DBManager.load_last_state(conversation_id) or {}
+    prev_context = DBManager.load_conversation_context(conversation_id) or {}
     prev_source = prev_context.get("active_source")
 
     active_property = property_id or prev_context.get("property_id") or session.get("property_id")
@@ -1183,8 +1164,13 @@ def handle_question(
                 question=question,
                 property_id=active_property,
                 conversation_id=conversation_id,
-                semantic=semantic
+                semantic=semantic,
+                user_name=session.get("user_name", "")
             )
+
+            # 신형 파이프라인 응답도 follow-up에서 재사용 가능하도록 저장
+            if conversation_id and isinstance(res, dict):
+                DBManager.save_last_result(conversation_id, "ga4", res)
 
             history.add_ai_message(str(res.get("message", "")))
             return {"response": res, "route": "ga4"}
@@ -1274,7 +1260,65 @@ def post_process(last_result, question):
                 "plot_data": []
             }
 
-        # 🔥 단순 재요약 버전 (LLM 재가공)
+        q = (question or "").lower()
+
+        # 원인/왜 질문은 우선 규칙기반으로 답변 (데이터 기반 설명 + 실행 제안)
+        if any(k in q for k in ["원인", "왜", "이유", "해석"]):
+            if isinstance(raw_data, list) and raw_data and isinstance(raw_data[0], dict):
+                sample = raw_data[0]
+                keys = list(sample.keys())
+
+                def _to_num(v):
+                    try:
+                        import re
+                        t = re.sub(r"[^\d\.\-]", "", str(v))
+                        return float(t) if t not in ("", "-", ".", "-.") else None
+                    except Exception:
+                        return None
+
+                metric_key = None
+                label_key = None
+                for k in keys:
+                    if metric_key is None and _to_num(sample.get(k)) is not None:
+                        metric_key = k
+                    if label_key is None and _to_num(sample.get(k)) is None:
+                        label_key = k
+
+                if metric_key:
+                    vals = []
+                    labels = []
+                    for row in raw_data:
+                        if not isinstance(row, dict):
+                            continue
+                        n = _to_num(row.get(metric_key))
+                        if n is None:
+                            continue
+                        vals.append(n)
+                        labels.append(str(row.get(label_key, "")) if label_key else "")
+
+                    if vals:
+                        total = sum(vals)
+                        top1 = vals[0]
+                        top3 = sum(vals[:3])
+                        top1_share = (top1 / total * 100) if total else 0
+                        top3_share = (top3 / total * 100) if total else 0
+                        top_label = labels[0] if labels else "상위 항목"
+                        concentration = "집중" if top1_share >= 40 else "분산"
+                        msg = (
+                            f"원인 분석 관점에서 보면 상위 성과는 **{concentration} 구조**입니다.\n"
+                            f"- 1위 항목: **{top_label}**\n"
+                            f"- 1위 비중: **{top1_share:.1f}%**\n"
+                            f"- 상위 3개 비중: **{top3_share:.1f}%**\n\n"
+                            "다음으로는 1위 항목을 채널/디바이스/랜딩페이지로 분해해 원인을 확정하는 것이 좋습니다."
+                        )
+                        return {
+                            "message": msg,
+                            "plot_data": last_result.get("plot_data", []),
+                            "structured_insight": structured,
+                            "raw_data": raw_data
+                        }
+
+        # 기본: LLM 재요약
         prompt = f"""
         아래는 이전 분석 결과입니다:
 
@@ -1297,7 +1341,8 @@ def post_process(last_result, question):
         return {
             "message": message,
             "plot_data": last_result.get("plot_data", []),
-            "structured_insight": structured
+            "structured_insight": structured,
+            "raw_data": raw_data
         }
 
     except Exception as e:

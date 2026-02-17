@@ -14,6 +14,7 @@ from google.analytics.data_v1beta import BetaAnalyticsDataClient
 from google.analytics.data_v1beta.types import (
     RunReportRequest, 
     FilterExpression, 
+    FilterExpressionList,
     Filter, 
     OrderBy,
     Dimension,
@@ -187,20 +188,54 @@ class PlanExecutor:
         client = BetaAnalyticsDataClient(credentials=credentials)
         
         # Build request
-        ga4_dimensions = [Dimension(name=d["name"]) for d in dimensions]
+        working_dimensions = list(dimensions)
+        ga4_dimensions = [Dimension(name=d["name"]) for d in working_dimensions]
         ga4_metrics = [Metric(name=m["name"]) for m in metrics]
         
         date_ranges = [DateRange(start_date=start_date, end_date=end_date)]
         
         # Filters
         filter_ex = None
+        filter_expressions = []
         if filters and filters.get("event_filter"):
-            filter_ex = FilterExpression(
-                filter=Filter(
-                    field_name="eventName",
-                    string_filter=Filter.StringFilter(value=filters["event_filter"])
+            filter_expressions.append(
+                FilterExpression(
+                    filter=Filter(
+                        field_name="eventName",
+                        string_filter=Filter.StringFilter(value=filters["event_filter"])
+                    )
                 )
             )
+        if filters and isinstance(filters.get("dimension_filters"), list):
+            for f in filters["dimension_filters"]:
+                if not isinstance(f, dict):
+                    continue
+                field = f.get("field")
+                value = str(f.get("value", "")).strip()
+                match_type = str(f.get("match_type", "contains")).lower()
+                if not field or not value:
+                    continue
+                sf_kwargs = {"value": value}
+                if match_type == "exact":
+                    sf_kwargs["match_type"] = Filter.StringFilter.MatchType.EXACT
+                else:
+                    sf_kwargs["match_type"] = Filter.StringFilter.MatchType.CONTAINS
+                filter_expressions.append(
+                    FilterExpression(
+                        filter=Filter(
+                            field_name=field,
+                            string_filter=Filter.StringFilter(**sf_kwargs)
+                        )
+                    )
+                )
+        if len(filter_expressions) == 1:
+            filter_ex = filter_expressions[0]
+        elif len(filter_expressions) > 1:
+            op = str((filters or {}).get("dimension_filters_operator", "and")).lower()
+            if op == "or":
+                filter_ex = FilterExpression(or_group=FilterExpressionList(expressions=filter_expressions))
+            else:
+                filter_ex = FilterExpression(and_group=FilterExpressionList(expressions=filter_expressions))
         
         # Order by
         ga4_order_bys = []
@@ -235,7 +270,29 @@ class PlanExecutor:
         logging.info(f"[GA4 API] Calling with {len(ga4_dimensions)} dims, {len(ga4_metrics)} metrics")
         
         # Execute
-        response = client.run_report(request)
+        try:
+            response = client.run_report(request)
+        except Exception as e:
+            msg = str(e).lower()
+            has_custom_dims = any(str(d.get("name", "")).startswith("customEvent:") for d in working_dimensions)
+            if has_custom_dims and any(k in msg for k in ["unknown dimension", "invalid argument", "customevent:"]):
+                logging.warning("[GA4 API] customEvent dimension unavailable, retrying without custom dimensions")
+                working_dimensions = [d for d in working_dimensions if not str(d.get("name", "")).startswith("customEvent:")]
+                if not working_dimensions:
+                    raise
+                ga4_dimensions_retry = [Dimension(name=d["name"]) for d in working_dimensions]
+                request = RunReportRequest(
+                    property=f"properties/{property_id}",
+                    dimensions=ga4_dimensions_retry,
+                    metrics=ga4_metrics,
+                    date_ranges=date_ranges,
+                    dimension_filter=filter_ex,
+                    order_bys=ga4_order_bys if ga4_order_bys else None,
+                    limit=limit
+                )
+                response = client.run_report(request)
+            else:
+                raise
         
         # Parse response
         rows = []
@@ -244,7 +301,7 @@ class PlanExecutor:
             
             # Dimensions
             for i, dim_value in enumerate(row.dimension_values):
-                dim_name = dimensions[i]["name"]
+                dim_name = working_dimensions[i]["name"]
                 row_data[dim_name] = dim_value.value
             
             # Metrics

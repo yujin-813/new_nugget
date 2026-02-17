@@ -20,7 +20,8 @@ def handle_ga4_question(
     question: str,
     property_id: str,
     conversation_id: Optional[str] = None,
-    semantic=None
+    semantic=None,
+    user_name: str = ""
 ) -> Dict[str, Any]:
     """
     GA4 질문 처리 통합 래퍼
@@ -53,7 +54,11 @@ def handle_ga4_question(
         
         # 🔥 Convert new format to legacy format for frontend compatibility
         from response_adapter import adapt_pipeline_response_to_legacy
-        legacy_result = adapt_pipeline_response_to_legacy(result)
+        legacy_result = adapt_pipeline_response_to_legacy(
+            result,
+            question=question,
+            user_name=user_name
+        )
         return legacy_result
     else:
         logging.info("[Integration] Using LEGACY ENGINE")

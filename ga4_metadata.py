@@ -758,7 +758,7 @@ GA4_METRICS = {
     },
     "bounceRate": {
         "ui_name": "이탈률",
-        "aliases": ["이탈률", "바운스", "종료율"],
+        "aliases": ["이탈률", "이탈율", "바운스", "종료율"],
         "kr_semantics": ["이탈", "나감"],
         "category": "engagement",
         "priority": 4,
@@ -899,9 +899,10 @@ GA4_METRICS = {
     },
     "firstTimePurchasers": {
         "ui_name": "최초 구매자 수",
-        "aliases": ["첫구매자", "최초구매자"],
-        "kr_semantics": ["첫 구매 사용자"],
+        "aliases": ["첫구매자", "최초구매자", "신규구매자", "신규후원자", "첫후원자"],
+        "kr_semantics": ["첫 구매 사용자", "신규 후원자"],
         "category": "ecommerce",
+        "scope": "event",
         "priority": 4,
         "concept": "ecommerce",
         "description": "첫 구매 이벤트 완료 사용자 수"
@@ -1084,9 +1085,10 @@ GA4_METRICS = {
     },
     "purchaserRate": {
         "ui_name": "구매자 비율",
-        "aliases": ["구매율", "구매자비율"],
-        "kr_semantics": ["구매한사용자비율"],
+        "aliases": ["구매율", "구매자비율", "후원자비율", "후원율"],
+        "kr_semantics": ["구매한사용자비율", "후원자 비율"],
         "category": "ecommerce",
+        "scope": "event",
         "priority": 4,
         "concept": "ecommerce",
         "description": "1회 이상 구매 거래를 한 활성 사용자의 비율"
@@ -1138,9 +1140,10 @@ GA4_METRICS = {
     },
     "totalPurchasers": {
         "ui_name": "전체 구매자 수",
-        "aliases": ["구매자수", "총구매자"],
-        "kr_semantics": ["구매한사용자수"],
+        "aliases": ["구매자수", "총구매자", "후원자수", "총후원자"],
+        "kr_semantics": ["구매한사용자수", "후원한사용자수"],
         "category": "ecommerce",
+        "scope": "event",
         "priority": 4,
         "concept": "ecommerce",
         "description": "구매 이벤트를 기록한 사용자 수"
@@ -1150,8 +1153,247 @@ GA4_METRICS = {
 # ------------------------------
 # Custom Definition Placeholders
 # ------------------------------
-GA4_CUSTOM_DIMENSIONS = {}
+GA4_CUSTOM_DIMENSIONS = {
+    # purchase 이벤트 커스텀 파라미터 (등록된 속성에서만 조회 가능)
+    "customEvent:is_regular_donation": {
+        "ui_name": "정기후원 여부",
+        "aliases": ["is_regular_donation", "정기후원여부", "정기후원", "정기/일시"],
+        "kr_semantics": ["정기후원", "일시후원"],
+        "category": "event",
+        "scope": "event",
+        "priority": 5,
+        "description": "purchase 이벤트 커스텀 파라미터"
+    },
+    "customEvent:country_name": {
+        "ui_name": "국가명(커스텀)",
+        "aliases": ["country_name", "국가명", "국가"],
+        "kr_semantics": ["국가별"],
+        "category": "event",
+        "scope": "event",
+        "priority": 4,
+        "description": "purchase 이벤트 커스텀 파라미터"
+    },
+    "customEvent:domestic_children_count": {
+        "ui_name": "국내 아동 수",
+        "aliases": ["domestic_children_count", "국내아동수", "국내아동"],
+        "kr_semantics": ["국내 아동"],
+        "category": "event",
+        "scope": "event",
+        "priority": 4,
+        "description": "purchase 이벤트 커스텀 파라미터"
+    },
+    "customEvent:overseas_children_count": {
+        "ui_name": "해외 아동 수",
+        "aliases": ["overseas_children_count", "해외아동수", "해외아동"],
+        "kr_semantics": ["해외 아동"],
+        "category": "event",
+        "scope": "event",
+        "priority": 4,
+        "description": "purchase 이벤트 커스텀 파라미터"
+    },
+    "customEvent:letter_translation": {
+        "ui_name": "편지 번역 여부",
+        "aliases": ["letter_translation", "편지번역", "번역여부"],
+        "kr_semantics": ["편지 번역"],
+        "category": "event",
+        "scope": "event",
+        "priority": 3,
+        "description": "purchase 이벤트 커스텀 파라미터"
+    },
+    "customEvent:donation_name": {
+        "ui_name": "후원명",
+        "aliases": ["donation_name", "후원명", "후원이름"],
+        "kr_semantics": ["후원명"],
+        "category": "event",
+        "scope": "event",
+        "priority": 5,
+        "description": "purchase 이벤트 커스텀 파라미터"
+    },
+    "customEvent:menu_name": {
+        "ui_name": "메뉴명",
+        "aliases": ["menu_name", "menu name", "메뉴명", "메뉴 네임", "메뉴이름"],
+        "kr_semantics": ["메뉴", "네비", "gnb", "메뉴 클릭"],
+        "category": "event",
+        "scope": "event",
+        "priority": 5,
+        "description": "커스텀 이벤트 파라미터 (예: gnb_click)"
+    },
+    "customEvent:banner_name": {
+        "ui_name": "배너명",
+        "aliases": ["banner_name", "배너명", "배너 이름"],
+        "kr_semantics": ["배너"],
+        "category": "event",
+        "scope": "event",
+        "priority": 4,
+        "description": "이벤트 커스텀 파라미터"
+    },
+    "customEvent:button_name": {
+        "ui_name": "버튼명",
+        "aliases": ["button_name", "버튼명", "버튼 이름"],
+        "kr_semantics": ["버튼"],
+        "category": "event",
+        "scope": "event",
+        "priority": 4,
+        "description": "이벤트 커스텀 파라미터"
+    },
+    "customEvent:click_button": {
+        "ui_name": "클릭 버튼",
+        "aliases": ["click_button", "클릭버튼", "click allbutton", "click_allbutton"],
+        "kr_semantics": ["버튼 클릭"],
+        "category": "event",
+        "scope": "event",
+        "priority": 4,
+        "description": "click_allButton 이벤트의 click_button 파라미터"
+    },
+    "customEvent:click_location": {
+        "ui_name": "클릭 위치",
+        "aliases": ["click_location", "클릭위치"],
+        "kr_semantics": ["위치 클릭"],
+        "category": "event",
+        "scope": "event",
+        "priority": 4,
+        "description": "이벤트 커스텀 파라미터"
+    },
+    "customEvent:click_section": {
+        "ui_name": "클릭 섹션",
+        "aliases": ["click_section", "클릭섹션"],
+        "kr_semantics": ["섹션 클릭"],
+        "category": "event",
+        "scope": "event",
+        "priority": 4,
+        "description": "이벤트 커스텀 파라미터"
+    },
+    "customEvent:click_text": {
+        "ui_name": "클릭 텍스트",
+        "aliases": ["click_text", "클릭텍스트", "클릭 문자열"],
+        "kr_semantics": ["클릭 문구", "버튼 문구"],
+        "category": "event",
+        "scope": "event",
+        "priority": 4,
+        "description": "이벤트 커스텀 파라미터"
+    },
+    "customEvent:content_category": {
+        "ui_name": "콘텐츠 카테고리",
+        "aliases": ["content_category", "콘텐츠카테고리"],
+        "kr_semantics": ["콘텐츠 카테고리"],
+        "category": "event",
+        "scope": "event",
+        "priority": 4,
+        "description": "이벤트 커스텀 파라미터"
+    },
+    "customEvent:content_name": {
+        "ui_name": "콘텐츠 이름",
+        "aliases": ["content_name", "콘텐츠이름", "콘텐츠명"],
+        "kr_semantics": ["콘텐츠 이름"],
+        "category": "event",
+        "scope": "event",
+        "priority": 4,
+        "description": "이벤트 커스텀 파라미터"
+    },
+    "customEvent:content_type": {
+        "ui_name": "콘텐츠 유형",
+        "aliases": ["content_type", "콘텐츠유형", "콘텐츠 타입"],
+        "kr_semantics": ["콘텐츠 유형"],
+        "category": "event",
+        "scope": "event",
+        "priority": 4,
+        "description": "이벤트 커스텀 파라미터"
+    },
+    "customEvent:detail_category": {
+        "ui_name": "상세 카테고리",
+        "aliases": ["detail_category", "상세카테고리"],
+        "kr_semantics": ["상세 카테고리"],
+        "category": "event",
+        "scope": "event",
+        "priority": 4,
+        "description": "이벤트 커스텀 파라미터"
+    },
+    "customEvent:event_category": {
+        "ui_name": "Event Category",
+        "aliases": ["event_category", "event category", "이벤트 카테고리"],
+        "kr_semantics": ["이벤트 분류"],
+        "category": "event",
+        "scope": "event",
+        "priority": 3,
+        "description": "이벤트 커스텀 파라미터"
+    },
+    "customEvent:event_label": {
+        "ui_name": "Event Label",
+        "aliases": ["event_label", "event label", "이벤트 라벨"],
+        "kr_semantics": ["라벨"],
+        "category": "event",
+        "scope": "event",
+        "priority": 3,
+        "description": "이벤트 커스텀 파라미터"
+    },
+    "customEvent:main_category": {
+        "ui_name": "메인 카테고리",
+        "aliases": ["main_category", "메인카테고리"],
+        "kr_semantics": ["메인 카테고리"],
+        "category": "event",
+        "scope": "event",
+        "priority": 4,
+        "description": "이벤트 커스텀 파라미터"
+    },
+    "customEvent:sub_category": {
+        "ui_name": "서브 카테고리",
+        "aliases": ["sub_category", "서브카테고리"],
+        "kr_semantics": ["서브 카테고리"],
+        "category": "event",
+        "scope": "event",
+        "priority": 4,
+        "description": "이벤트 커스텀 파라미터"
+    },
+    "customEvent:payment_type": {
+        "ui_name": "결제 유형",
+        "aliases": ["payment_type", "결제유형", "결제 타입"],
+        "kr_semantics": ["결제"],
+        "category": "event",
+        "scope": "event",
+        "priority": 4,
+        "description": "이벤트 커스텀 파라미터"
+    },
+    "customEvent:percent_scrolled": {
+        "ui_name": "스크롤 비율",
+        "aliases": ["percent_scrolled", "스크롤비율", "스크롤 퍼센트"],
+        "kr_semantics": ["스크롤"],
+        "category": "event",
+        "scope": "event",
+        "priority": 3,
+        "description": "이벤트 커스텀 파라미터"
+    },
+    "customEvent:referrer_host": {
+        "ui_name": "유입 호스트",
+        "aliases": ["referrer_host", "리퍼러 호스트", "유입호스트"],
+        "kr_semantics": ["리퍼러 호스트"],
+        "category": "event",
+        "scope": "event",
+        "priority": 3,
+        "description": "이벤트 커스텀 파라미터"
+    },
+    "customEvent:referrer_pathname": {
+        "ui_name": "유입 경로(Pathname)",
+        "aliases": ["referrer_pathname", "리퍼러 경로", "유입경로"],
+        "kr_semantics": ["리퍼러 경로"],
+        "category": "event",
+        "scope": "event",
+        "priority": 3,
+        "description": "이벤트 커스텀 파라미터"
+    },
+    "customEvent:step": {
+        "ui_name": "단계",
+        "aliases": ["step", "스텝", "단계"],
+        "kr_semantics": ["단계"],
+        "category": "event",
+        "scope": "event",
+        "priority": 3,
+        "description": "이벤트 커스텀 파라미터"
+    },
+}
 GA4_CUSTOM_METRICS = {}
+
+# 커스텀 차원을 기본 차원 registry에 병합
+GA4_DIMENSIONS.update(GA4_CUSTOM_DIMENSIONS)
 
 # ------------------------------
 # 기본값 / 추천 정책
