@@ -1036,8 +1036,13 @@ from google.analytics.data_v1beta.types import GetMetadataRequest
 ga4_engine = GA4AnalysisEngine()
 
 class QueryRouter:
-    GA4_KEYWORDS = ["사용자", "세션", "페이지뷰", "이벤트", "전환", "실적", "성과", "어제", "지난주", "지난달", "오늘", "ga4", "analytics", "트래픽"]
-    FILE_KEYWORDS = ["파일", "문서", "업로드", "내용", "컬럼", "열", "행", "csv", "엑셀", "xlsx"]
+    GA4_KEYWORDS = [
+        "사용자", "유저", "세션", "페이지뷰", "이벤트", "전환", "실적", "성과",
+        "어제", "오늘", "지난주", "지난달", "이번주", "이번달",
+        "ga4", "analytics", "트래픽", "유입", "채널", "소스", "매체",
+        "구매", "매출", "수익", "광고", "campaign", "source", "medium"
+    ]
+    FILE_KEYWORDS = ["파일", "문서", "업로드", "내용", "컬럼", "열", "행", "csv", "엑셀", "xlsx", "시트", "sheet"]
     
 
     @classmethod
@@ -1046,13 +1051,187 @@ class QueryRouter:
         if any(k in q for k in ["연결", "속성", "계정"]): return "system", True
         
         context = DBManager.load_conversation_context(conversation_id) if conversation_id else None
-        has_ga4 = any(k in q for k in cls.GA4_KEYWORDS)
-        has_file = any(k in q for k in cls.FILE_KEYWORDS)
-        
-        if has_ga4 and has_file: return "mixed", False
-        if has_file: return "file", False
+        ga_score = sum(1 for k in cls.GA4_KEYWORDS if k in q)
+        file_score = sum(1 for k in cls.FILE_KEYWORDS if k in q)
+
+        # 명시적 우선
+        if "ga4" in q or "analytics" in q:
+            return "ga4", True
+        if any(k in q for k in ["csv", "xlsx", "엑셀", "파일", "컬럼", "열"]):
+            if ga_score == 0:
+                return "file", True
+
+        # 점수 기반 라우팅 (활성 소스보다 질문 신호 우선)
+        if ga_score > 0 and file_score == 0:
+            return "ga4", False
+        if file_score > 0 and ga_score == 0:
+            return "file", False
+        if ga_score > 0 and file_score > 0:
+            return "mixed", False
+
         if context and context.get("active_source"): return context["active_source"], False
         return "ga4", False
+
+def _list_session_file_candidates(active_file=None):
+    files = []
+    seen = set()
+
+    def _add(fp):
+        if not fp:
+            return
+        p = os.path.abspath(str(fp))
+        if p in seen:
+            return
+        if os.path.isfile(p):
+            seen.add(p)
+            files.append(p)
+
+    _add(active_file)
+    _add(session.get("preprocessed_data_path"))
+    _add(session.get("uploaded_file_path"))
+
+    selected = session.get("selected_datasets") or []
+    if isinstance(selected, list):
+        for name in selected:
+            if not isinstance(name, str):
+                continue
+            fp = os.path.join(UPLOAD_FOLDER, name)
+            _add(fp)
+
+    try:
+        for name in os.listdir(UPLOAD_FOLDER):
+            _add(os.path.join(UPLOAD_FOLDER, name))
+    except Exception:
+        pass
+    return files
+
+def _read_columns_quick(file_path):
+    try:
+        fp = str(file_path).lower()
+        if fp.endswith(".csv"):
+            return [str(c) for c in pd.read_csv(file_path, nrows=0).columns]
+        if fp.endswith(".xlsx") or fp.endswith(".xls"):
+            return [str(c) for c in pd.read_excel(file_path, nrows=0).columns]
+    except Exception:
+        return []
+    return []
+
+def _resolve_file_for_question(question, active_file):
+    q = str(question or "").lower()
+    candidates = _list_session_file_candidates(active_file)
+    if not candidates:
+        return active_file, None, False
+
+    # 1) explicit filename mention
+    for fp in candidates:
+        base = os.path.basename(fp).lower()
+        stem = os.path.splitext(base)[0]
+        if base in q or stem in q:
+            if os.path.abspath(fp) != os.path.abspath(active_file or ""):
+                return fp, f"질문에 지정된 파일 `{base}` 기준으로 전환했습니다.", False
+            return fp, None, False
+
+    # 2) "other file" intent
+    if any(k in q for k in ["다른 파일", "다른파일", "파일 바꿔", "파일 변경", "next file"]):
+        ordered = candidates
+        if active_file and os.path.abspath(active_file) in [os.path.abspath(x) for x in ordered]:
+            idx = [os.path.abspath(x) for x in ordered].index(os.path.abspath(active_file))
+            next_fp = ordered[(idx + 1) % len(ordered)]
+        else:
+            next_fp = ordered[0]
+        if active_file and os.path.abspath(next_fp) != os.path.abspath(active_file):
+            return next_fp, f"다른 파일 요청으로 `{os.path.basename(next_fp)}` 기준으로 전환했습니다.", False
+
+    # 3) column-name match across files
+    tokens = [t for t in re.findall(r"[a-zA-Z0-9가-힣_]+", q) if len(t) >= 2]
+    if not tokens:
+        return active_file, None
+
+    best_fp = active_file
+    best_score = -1
+    current_score = -1
+    for fp in candidates:
+        cols = _read_columns_quick(fp)
+        if not cols:
+            continue
+        col_text = " ".join([c.lower() for c in cols])
+        score = 0
+        for tok in tokens:
+            if tok in col_text:
+                score += 2
+        b = os.path.basename(fp).lower()
+        for tok in tokens:
+            if tok in b:
+                score += 1
+        if active_file and os.path.abspath(fp) == os.path.abspath(active_file):
+            current_score = score
+        if score > best_score:
+            best_score = score
+            best_fp = fp
+
+    if best_fp and active_file and os.path.abspath(best_fp) != os.path.abspath(active_file):
+        if best_score >= 2 and best_score > current_score:
+            return best_fp, f"현재 질문은 `{os.path.basename(best_fp)}` 파일 컬럼과 더 잘 맞습니다.", True
+
+    return active_file, None, False
+
+def _is_source_ambiguous_question(question: str) -> bool:
+    q = str(question or "").lower()
+    if not q:
+        return False
+    has_source_hint = any(k in q for k in ["ga4", "analytics", "파일", "csv", "xlsx", "엑셀"])
+    if has_source_hint:
+        return False
+    # GA4 시간축 질문은 기본적으로 GA4 우선
+    if any(k in q for k in ["지난주", "지난달", "이번주", "이번달", "오늘", "어제"]) and any(k in q for k in ["추이", "트렌드", "흐름", "사용자", "세션", "매출"]):
+        return False
+    # 사용자/매출/기본 수치 같은 공통 질문은 소스 모호할 수 있음
+    common = any(k in q for k in ["사용자", "유저", "회원", "인원", "명", "매출", "수익", "구매", "이벤트"])
+    is_short = len(q) <= 30
+    return common and is_short
+
+def _normalize_choice_text(text: str) -> str:
+    s = str(text or "").strip().lower()
+    # markdown/code/backtick/quotes 제거
+    s = s.replace("`", "").replace("'", "").replace('"', "")
+    s = re.sub(r"\s+", "", s)
+    return s
+
+def _question_intent_flags(question: str):
+    q = str(question or "").lower()
+    return {
+        "revenue": any(k in q for k in ["매출", "수익", "revenue", "sales", "금액"]),
+        "users": any(k in q for k in ["사용자", "유저", "회원", "인원", "명"]),
+        "events": any(k in q for k in ["이벤트", "클릭", "event"]),
+        "channel": any(k in q for k in ["채널", "소스", "매체", "유입", "경로", "source", "medium"]),
+        "product": any(k in q for k in ["상품", "item", "제품"]),
+    }
+
+def _file_capability_score(question: str, file_path: str) -> int:
+    cols = [c.lower() for c in _read_columns_quick(file_path)]
+    if not cols:
+        return 0
+    col_text = " ".join(cols)
+    f = _question_intent_flags(question)
+    score = 0
+    if f["revenue"]:
+        if any(k in col_text for k in ["revenue", "sales", "amount", "매출", "수익", "금액", "price"]):
+            score += 3
+        else:
+            score -= 2
+    if f["users"]:
+        if any(k in col_text for k in ["user", "member", "customer", "회원", "사용자", "uid", "id"]):
+            score += 2
+    if f["events"]:
+        if any(k in col_text for k in ["event", "click", "이벤트", "클릭"]):
+            score += 2
+    if f["channel"]:
+        if any(k in col_text for k in ["channel", "source", "medium", "campaign", "채널", "소스", "매체", "유입"]):
+            score += 2
+    if f["product"]:
+        if any(k in col_text for k in ["item", "product", "상품", "카테고리"]):
+            score += 2
+    return score
 
 def handle_question(
     question,
@@ -1060,12 +1239,66 @@ def handle_question(
     file_path=None,
     user_id="anonymous",
     conversation_id=None,
-    semantic=None
+    semantic=None,
+    beginner_mode=False
 ):
     from flask import session
 
     if not conversation_id:
         conversation_id = "default_session"
+
+    # 파일 전환 확인 처리 (예/아니오)
+    pending_file_switch = session.get("pending_file_switch")
+    if pending_file_switch:
+        normalized = question.strip().lower()
+        is_yes = any(tok in normalized for tok in ["예", "네", "응", "맞", "그래", "ㅇㅇ"])
+        is_no = any(tok in normalized for tok in ["아니", "아니오", "틀", "no", "ㄴㄴ"])
+        if is_yes:
+            target = pending_file_switch.get("target_file")
+            if target and os.path.isfile(target):
+                session["uploaded_file_path"] = target
+            question = pending_file_switch.get("original_question") or question
+            session.pop("pending_file_switch", None)
+        elif is_no:
+            question = pending_file_switch.get("original_question") or question
+            session.pop("pending_file_switch", None)
+        else:
+            return {
+                "response": {
+                    "message": f"다른 파일 전환 확인이 필요합니다. `예` 또는 `아니오`로 답해 주세요.\n후보 파일: `{os.path.basename(pending_file_switch.get('target_file') or '')}`",
+                    "status": "clarify",
+                    "plot_data": []
+                },
+                "route": "system"
+            }
+
+    # 소스 선택 확인 처리 (GA4 / 파일)
+    pending_source = session.get("pending_source_choice")
+    forced_route = None
+    if pending_source:
+        normalized = _normalize_choice_text(question)
+        # 선택 루프 방지를 위해 숫자/키워드 해석을 넓게 허용
+        choose_ga = normalized in {"1", "1번", "ga", "ga4", "analytics", "ga로", "ga4로"}
+        choose_file = normalized in {"2", "2번", "file", "파일", "파일로"}
+        if choose_ga:
+            forced_route = "ga4"
+            question = pending_source.get("original_question") or question
+            session.pop("pending_source_choice", None)
+        elif choose_file:
+            forced_route = "file"
+            question = pending_source.get("original_question") or question
+            session.pop("pending_source_choice", None)
+        else:
+            return {
+                "response": {
+                    "message": "이 질문을 어떤 데이터로 볼까요?\n1. GA4\n2. 파일\n`1번` 또는 `2번`으로 답해 주세요.",
+                    "status": "clarify",
+                    "plot_data": [],
+                    "followup_suggestions": ["1번", "2번"],
+                    "options": ["1번", "2번"]
+                },
+                "route": "system"
+            }
 
     history = ConversationSummaryMemory.get_chat_history(user_id, conversation_id)
 
@@ -1105,13 +1338,54 @@ def handle_question(
 
     history.add_user_message(question)
 
-    route, is_explicit = QueryRouter.determine_route(question, conversation_id)
-
     prev_context = DBManager.load_conversation_context(conversation_id) or {}
     prev_source = prev_context.get("active_source")
 
     active_property = property_id or prev_context.get("property_id") or session.get("property_id")
     active_file = file_path or prev_context.get("file_path") or session.get("uploaded_file_path")
+    if not forced_route and active_property and active_file and _is_source_ambiguous_question(question):
+        # 파일이 질문을 소화할 근거가 약하면 GA4 우선으로 자동 라우팅
+        file_score = _file_capability_score(question, active_file)
+        if file_score < 1:
+            forced_route = "ga4"
+        else:
+            session["pending_source_choice"] = {"original_question": question}
+            return {
+                "response": {
+                    "message": "이 질문은 GA4와 파일 둘 다에서 해석될 수 있어요. 어느 쪽으로 볼까요?\n1. GA4\n2. 파일",
+                    "status": "clarify",
+                    "plot_data": [],
+                    "followup_suggestions": ["1번", "2번"],
+                    "options": ["1번", "2번"]
+                },
+                "route": "system"
+            }
+
+    route, is_explicit = QueryRouter.determine_route(question, conversation_id)
+    if forced_route:
+        route = forced_route
+    file_switch_hint = None
+
+    if route in {"file", "mixed"}:
+        resolved_file, hint, needs_confirm = _resolve_file_for_question(question, active_file)
+        if needs_confirm and resolved_file and os.path.abspath(resolved_file) != os.path.abspath(active_file or ""):
+            session["pending_file_switch"] = {
+                "target_file": resolved_file,
+                "original_question": question
+            }
+            return {
+                "response": {
+                    "message": f"{hint}\n현재 파일은 `{os.path.basename(active_file or '')}` 입니다.\n`{os.path.basename(resolved_file)}`로 바꿔서 다시 분석할까요? (예/아니오)",
+                    "status": "clarify",
+                    "plot_data": [],
+                    "followup_suggestions": ["예", "아니오"]
+                },
+                "route": "system"
+            }
+        if resolved_file:
+            active_file = resolved_file
+            session["uploaded_file_path"] = resolved_file
+        file_switch_hint = hint
 
     if route != "system":
         DBManager.save_conversation_context(
@@ -1133,7 +1407,15 @@ def handle_question(
 
         # 2️⃣ FILE
         elif route == "file":
-            res = file_engine.process(question, active_file, conversation_id, prev_source)
+            res = file_engine.process(
+                question,
+                active_file,
+                conversation_id,
+                prev_source,
+                beginner_mode=bool(beginner_mode)
+            )
+            if file_switch_hint and isinstance(res, dict):
+                res["message"] = f"{file_switch_hint}\n{res.get('message','')}".strip()
             history.add_ai_message(str(res.get("message", "")))
             return {"response": res, "route": "file"}
 
@@ -1141,6 +1423,8 @@ def handle_question(
         elif route == "mixed":
             mixed = MixedAnalysisEngine(ga4_engine, file_engine)
             res = mixed.process(question, active_property, active_file, conversation_id)
+            if file_switch_hint and isinstance(res, dict):
+                res["message"] = f"{file_switch_hint}\n{res.get('message','')}".strip()
             history.add_ai_message(str(res.get("message", "")))
             return {"response": res, "route": "mixed"}
 

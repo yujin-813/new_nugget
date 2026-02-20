@@ -239,6 +239,35 @@ git push
 Google Cloud Console OAuth Client에 아래 URL 추가:
 - `https://<service-name>.onrender.com/oauth2callback`
 
+### 로컬 + Cloudflare Tunnel 테스트 시 OAuth 설정
+터널 URL로 로그인할 때 `400: redirect_uri_mismatch`가 나오면 아래를 확인하세요.
+
+1. 앱 실제 포트 확인 (`PORT=5001`이면 `http://localhost:5001`)
+2. 터널 실행:
+```bash
+cloudflared tunnel --url http://localhost:5001
+```
+3. 발급된 URL 기준으로 OAuth Redirect URI 등록:
+- `https://<your-trycloudflare-domain>/oauth2callback`
+4. `.env`에 명시(권장):
+```bash
+OAUTH_REDIRECT_URI=https://<your-trycloudflare-domain>/oauth2callback
+```
+
+주의:
+- `trycloudflare.com` quick tunnel URL은 매번 바뀔 수 있어 매번 재등록이 필요합니다.
+- 반복 테스트/운영용은 고정 도메인(예: Render URL, named tunnel) 사용을 권장합니다.
+
+## 리포트 추출/공유
+
+### Notion 추출
+- UI의 `Notion 추출` 버튼 또는 `POST /export_report/notion`
+
+### JANDI 요약 전송
+- 환경변수 설정(권장): `JANDI_WEBHOOK_URL`
+- UI의 `JANDI 전송` 버튼 또는 `POST /export_report/jandi`
+- 요청 바디에 `webhook_url`을 직접 넣어 override 가능
+
 ## 라이선스
 
 MIT License

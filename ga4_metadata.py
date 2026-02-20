@@ -893,6 +893,7 @@ GA4_METRICS = {
         "aliases": ["첫구매율", "최초구매율"],
         "kr_semantics": ["첫 구매 비율"],
         "category": "ecommerce",
+        "scope": "event",
         "priority": 4,
         "concept": "ecommerce",
         "description": "처음 구매한 활성 사용자 비율"

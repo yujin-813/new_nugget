@@ -1,0 +1,28 @@
+{
+  "generated_at": "20260219_131754",
+  "total": 1,
+  "passed": 1,
+  "failed": 0,
+  "pass_rate": 100.0,
+  "results": [
+    {
+      "id": 221,
+      "question": "파일 구조 알려줘",
+      "file_path": "uploaded_files/dev_member_info.csv",
+      "passed": true,
+      "reason": "",
+      "message": "파일 구조를 간단히 정리하면 **676행 / 22컬럼**입니다. 수치형 15개, 범주형 7개이고, 대표 컬럼은 `mi_idx, mb_no, mb_nick, mb_email, mb_birth, mb_sex` 입니다.",
+      "intent_plan": {
+        "source": "file",
+        "intent_type": "schema",
+        "group_col": null,
+        "metric_col": null,
+        "op": null,
+        "date_col": null,
+        "period": null,
+        "row_count": 676,
+        "column_count": 22
+      }
+    }
+  ]
+}

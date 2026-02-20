@@ -97,6 +97,8 @@ def _extract_entity_terms(question: str) -> List[str]:
     candidates.extend(re.findall(r"([가-힣A-Za-z0-9_\-/\[\] ]{2,30})\s*,\s*([가-힣A-Za-z0-9_\-/\[\] ]{2,30})\s*같은", q))
     # "X 국가별"
     candidates.extend(re.findall(r"([가-힣A-Za-z0-9_\-/\[\] ]{2,40})\s*국가별", q))
+    # "X의 ..." 패턴 (예: display의 소스 매체)
+    candidates.extend(re.findall(r"([가-힣A-Za-z0-9_\-/\[\]]{2,40})\s*의\s*", q))
     flat = []
     for c in candidates:
         if isinstance(c, tuple):
@@ -106,23 +108,35 @@ def _extract_entity_terms(question: str) -> List[str]:
 
     # 기존 후원 패턴은 유지
     flat.extend(re.findall(r"([가-힣A-Za-z0-9_]+후원)", q))
+    # 채널 토큰 직접 추출
+    for token in ["display", "paid", "organic", "direct", "referral", "unassigned", "cross-network"]:
+        if token in q.lower():
+            flat.append(token)
 
     stop = {
         "무엇", "어떤", "더", "알", "수", "있어", "있는", "기준", "관련", "정보",
         "비중", "추이", "원인", "분석", "상세", "매개변수", "파라미터", "항목", "상품", "아이템",
         "후원 이름", "후원명", "donation_name", "이탈", "이탈율", "이탈률", "활성", "신규", "매출", "수익", "세션", "전환",
-        "클릭", "구매", "구매로", "판매", "프로그램", "국가"
+        "클릭", "구매", "구매로", "판매", "프로그램", "국가",
+        "상품별", "아이템별", "제품별", "지난주", "이번주", "지난달", "이번달", "어제", "오늘",
+        "첫후원", "첫구매", "처음후원", "처음구매", "구매한", "사용자수", "사용자 수",
+        "후원자", "구매자", "유형", "타입", "전체"
     }
     uniq = []
     seen = set()
 
     def _clean_term(term: str) -> str:
         t = re.sub(r"\s+", " ", term).strip()
+        # "X별 ..." 구문은 차원 지정 표현으로 간주하여 엔티티에서 제거
+        t = re.sub(r"[A-Za-z0-9_가-힣]+\s*별.*$", "", t).strip()
+        # ranking/집계형 문장 정리
+        t = re.sub(r"^(가장|최고|최저|상위|하위)\s*", "", t).strip()
+        t = re.sub(r"(top\s*\d+|상위\s*\d+|\d+\s*위|\d+\s*[-~]\s*\d+)\s*", "", t, flags=re.IGNORECASE).strip()
         # 의미 없는 접미어/조사를 반복 제거
         while True:
             prev = t
             t = re.sub(r"\s*(관련|기준|정보|상세|매출|전환|추이|원인|분석|채널|캠페인)$", "", t).strip()
-            t = re.sub(r"(은|는|이|가|을|를|에|의)$", "", t).strip()
+            t = re.sub(r"(은|는|이|가|을|를|에|의|중|중에|쪽|쪽에)$", "", t).strip()
             if t == prev:
                 break
         t = re.sub(r"^(어떤|무슨|무엇)\s*", "", t).strip()
@@ -136,6 +150,11 @@ def _extract_entity_terms(question: str) -> List[str]:
             continue
         # 지나치게 일반적인 조각 제외
         if t.lower() in {"top", "ga4", "data", "report"}:
+            continue
+        if len(t.split()) >= 3 and any(k in t for k in ["가장", "상위", "매출", "상품", "사용자"]):
+            continue
+        # 조건/축 표현 오탐 제거
+        if any(noise in t.lower() for noise in ["event", "이벤트", "기준", "purchase", "click", "donation_name"]):
             continue
         key = t.lower()
         if key in seen:
@@ -211,6 +230,16 @@ class DateParser:
         if "어제" in q: period_phrases.append("어제")
         if "오늘" in q: period_phrases.append("오늘")
 
+        if ("지난달" in q and "이번달" in q):
+            # 비교 질의: 지난달 1일 ~ 오늘 (yearMonth 분해와 조합)
+            today = date.today()
+            first_this_month = today.replace(day=1)
+            last_month_end = first_this_month - timedelta(days=1)
+            last_month_start = last_month_end.replace(day=1)
+            delta_dates["start_date"] = last_month_start.strftime("%Y-%m-%d")
+            delta_dates["end_date"] = today.strftime("%Y-%m-%d")
+            return delta_dates
+
         if period_phrases:
             phrase = period_phrases[0]
             s_date, e_date = DateParser._phrase_to_range(phrase)
@@ -270,17 +299,21 @@ class IntentClassifier:
     @staticmethod
     def classify(question: str) -> str:
         q = question.lower()
+        if ("지난주" in q and ("그 전주" in q or "전주" in q)) and any(k in q for k in ["사용자", "유저", "세션"]):
+            return "comparison"
         
         # 1. Category List (최우선)
-        if "종류" in q or "무슨 이벤트" in q or "어떤 이벤트" in q:
+        if ("종류" in q and any(k in q for k in ["이벤트", "event", "목록"])) or "무슨 이벤트" in q or "어떤 이벤트" in q:
             return "category_list"
         
         # 2. TopN (명시적 숫자)
-        if re.search(r'(top\s*\d+|상위\s*\d+|\d+위|1-\d+|\d+개)', q):
+        if re.search(r'(top\s*\d+|상위\s*\d+|\d+\s*위|1\s*[-~]\s*\d+|\d+개)', q):
+            return "topn"
+        if any(k in q for k in ["가장", "최고", "최저", "높은", "낮은"]) and any(k in q for k in ["상품", "매출", "이벤트", "후원"]):
             return "topn"
 
         # 2.1 전체 항목/목록 후속 조회는 breakdown
-        if any(k in q for k in ["전체 항목", "전체 목록", "전체 프로그램", "모든 항목", "전부 보여", "다 보여"]):
+        if any(k in q for k in ["전체 항목", "전체 목록", "전체 프로그램", "모든 항목", "전부 보여", "다 보여", "전체 보여", "전체 보여줘", "이것 전체", "이거 전체"]):
             return "breakdown"
 
         # 2.5 비중/구성비/비율 -> breakdown
@@ -290,9 +323,17 @@ class IntentClassifier:
         # 2.55 비교형 자연어 ("A와 B는 어때?")
         if any(k in q for k in ["어때", "어떤게", "무엇이"]) and any(k in q for k in ["와", "과", "중"]):
             return "breakdown"
+        if any(k in q for k in ["유형", "타입", "종류"]) and any(k in q for k in ["어떤", "많이", "가장", "상위"]):
+            return "breakdown"
 
         # 2.6 탐색형 상세질문 -> breakdown
         if any(k in q for k in ["어떤 것을 더 알 수", "무엇을 더 알 수", "상세", "정보", "매개변수", "파라미터"]):
+            return "breakdown"
+
+        # donation_click / donation_name 클릭 분포 질문은 breakdown 우선
+        if any(k in q for k in ["donation_click", "donation_name"]) and any(k in q for k in ["클릭", "click", "주로 어떤", "순위", "많이"]):
+            return "breakdown"
+        if ("donation" in q and any(k in q for k in ["클릭", "click"])) and any(k in q for k in ["어떤", "주로", "순위", "top", "상위"]):
             return "breakdown"
         
         # 3. Trend
@@ -302,12 +343,24 @@ class IntentClassifier:
         # 4. Comparison
         if any(k in q for k in ["전주 대비", "비교", "차이", "증감", "compare", "vs"]):
             return "comparison"
+        if q.strip() in ["비교", "비교해", "비교해서", "대비", "증감"]:
+            return "comparison"
         
         # 5. Breakdown
         if any(k in q for k in ["별", "기준", "따라", "by "]):
             return "breakdown"
+
+        # 5.1 차원 축(채널/소스/매체 등) 언급은 breakdown
+        if any(k in q for k in ["채널", "소스", "매체", "디바이스", "기기", "랜딩", "국가", "카테고리", "유형", "타입", "종류", "메뉴명", "후원명", "광고", "paid", "display"]):
+            return "breakdown"
+        if len(q.strip()) <= 20 and any(k in q for k in ["name", "이름", "네임"]):
+            return "breakdown"
         
         # 6. Multi-metric (여러 지표 언급)
+        if any(k in q for k in ["와", "과", ","]) and any(k in q for k in ["사용자", "유저"]) and any(k in q for k in ["구매한", "구매자", "후원자", "구매"]):
+            return "metric_multi"
+        if any(k in q for k in ["와", "과", ","]) and any(k in q for k in ["구매수", "구매 건수", "구매건수", "트랜잭션"]) and any(k in q for k in ["전체 구매자", "구매자", "후원자"]):
+            return "metric_multi"
         metric_count = sum(1 for m_meta in GA4_METRICS.values() 
                           if m_meta.get("ui_name", "").lower() in q)
         if metric_count > 1:
@@ -512,6 +565,84 @@ class MetricCandidateExtractor:
                 })
                 seen.add(m_name)
 
+        # 유입 축(소스/매체/채널) + 구매/매출 질문은 구매 기여 지표 우선
+        has_acq_axis = any(k in q for k in ["소스", "매체", "채널", "유입", "source", "medium"])
+        has_purchase_intent = any(k in q for k in ["구매", "매출", "수익", "후원"])
+        if has_acq_axis and has_purchase_intent:
+            for m_name, sc in [("purchaseRevenue", 0.97), ("totalPurchasers", 0.95), ("transactions", 0.90)]:
+                if m_name in seen:
+                    for c in candidates:
+                        if c.get("name") == m_name:
+                            c["score"] = max(c.get("score", 0), sc)
+                            c["matched_by"] = "acq_purchase_slot_rule"
+                    continue
+                meta = GA4_METRICS.get(m_name, {})
+                scope = meta.get("scope") or MetricCandidateExtractor._infer_scope_from_category(meta.get("category"))
+                candidates.append({
+                    "name": m_name,
+                    "score": sc,
+                    "matched_by": "acq_purchase_slot_rule",
+                    "scope": scope,
+                    "priority": meta.get("priority", 0)
+                })
+                seen.add(m_name)
+
+        # "후원 유형별 매출"은 이벤트 파라미터 기반 매출 집계 우선
+        if any(k in q for k in ["후원 유형", "후원유형"]) and any(k in q for k in ["매출", "수익", "금액", "revenue"]):
+            for m_name, sc in [("purchaseRevenue", 0.96), ("eventCount", 0.86)]:
+                if m_name in seen:
+                    for c in candidates:
+                        if c.get("name") == m_name:
+                            c["score"] = max(c.get("score", 0), sc)
+                            c["matched_by"] = "donation_type_revenue_rule"
+                    continue
+                meta = GA4_METRICS.get(m_name, {})
+                scope = meta.get("scope") or MetricCandidateExtractor._infer_scope_from_category(meta.get("category"))
+                candidates.append({
+                    "name": m_name,
+                    "score": sc,
+                    "matched_by": "donation_type_revenue_rule",
+                    "scope": scope,
+                    "priority": meta.get("priority", 0)
+                })
+                seen.add(m_name)
+
+        # 이벤트 종류/목록 질문은 eventCount 우선
+        if any(k in q for k in ["이벤트 종류", "이벤트 목록", "무슨 이벤트", "어떤 이벤트"]):
+            if "eventCount" in seen:
+                for c in candidates:
+                    if c.get("name") == "eventCount":
+                        c["score"] = max(c.get("score", 0), 0.99)
+                        c["matched_by"] = "event_category_list_rule"
+            else:
+                meta = GA4_METRICS.get("eventCount", {})
+                candidates.append({
+                    "name": "eventCount",
+                    "score": 0.99,
+                    "matched_by": "event_category_list_rule",
+                    "scope": meta.get("scope") or MetricCandidateExtractor._infer_scope_from_category(meta.get("category")),
+                    "priority": meta.get("priority", 0)
+                })
+                seen.add("eventCount")
+
+        # purchase vs donation_click 비교는 건수(eventCount) 우선
+        if ("donation_click" in q) and any(k in q for k in ["purchase", "구매"]):
+            if "eventCount" in seen:
+                for c in candidates:
+                    if c.get("name") == "eventCount":
+                        c["score"] = max(c.get("score", 0), 0.97)
+                        c["matched_by"] = "event_pair_compare_rule"
+            else:
+                meta = GA4_METRICS.get("eventCount", {})
+                candidates.append({
+                    "name": "eventCount",
+                    "score": 0.97,
+                    "matched_by": "event_pair_compare_rule",
+                    "scope": meta.get("scope") or MetricCandidateExtractor._infer_scope_from_category(meta.get("category")),
+                    "priority": meta.get("priority", 0)
+                })
+                seen.add("eventCount")
+
         # 클릭/이벤트 항목 탐색 질문은 이벤트 카운트 지표 우선
         click_terms = ["클릭", "눌", "tap", "click"]
         item_probe_terms = ["항목", "무엇", "뭐", "어떤", "많이", "상위"]
@@ -539,6 +670,27 @@ class MetricCandidateExtractor:
                     if c.get("name") in ["purchaseRevenue", "itemRevenue", "grossItemRevenue"]:
                         c["score"] = max(0.0, c.get("score", 0) - 0.25)
 
+        # "정기후원의 클릭수" 같은 패턴은 donation_click + donation_name(eventCount)로 보정
+        has_donation_entity = bool(re.search(r"[가-힣A-Za-z0-9_]+후원", question))
+        if has_donation_entity and any(k in q for k in ["클릭수", "클릭", "click"]) and not any(k in q for k in ["메뉴", "gnb", "lnb", "footer"]):
+            for m_name, sc in [("eventCount", 0.99), ("keyEvents", 0.90)]:
+                if m_name in seen:
+                    for c in candidates:
+                        if c.get("name") == m_name:
+                            c["score"] = max(c.get("score", 0), sc)
+                            c["matched_by"] = "donation_entity_click_rule"
+                    continue
+                meta = GA4_METRICS.get(m_name, {})
+                scope = meta.get("scope") or MetricCandidateExtractor._infer_scope_from_category(meta.get("category"))
+                candidates.append({
+                    "name": m_name,
+                    "score": sc,
+                    "matched_by": "donation_entity_click_rule",
+                    "scope": scope,
+                    "priority": meta.get("priority", 0)
+                })
+                seen.add(m_name)
+
         # 스크롤 질의는 scroll 이벤트 카운트 우선
         if any(k in q for k in ["스크롤", "scroll"]):
             for m_name, sc in [("eventCount", 0.95), ("keyEvents", 0.84), ("scrolledUsers", 0.82)]:
@@ -563,6 +715,24 @@ class MetricCandidateExtractor:
 
         # 이벤트 파라미터 존재/조회 질의는 eventCount로 기본 조회 가능하게 보강
         event_token = _extract_event_name_token(question)
+        if ("후원" in q and "클릭" in q) and not event_token:
+            event_token = "donation_click"
+        if event_token:
+            if "eventCount" in seen:
+                for c in candidates:
+                    if c.get("name") == "eventCount":
+                        c["score"] = max(c.get("score", 0), 0.97)
+                        c["matched_by"] = "event_token_metric_rule"
+            else:
+                meta = GA4_METRICS.get("eventCount", {})
+                candidates.append({
+                    "name": "eventCount",
+                    "score": 0.97,
+                    "matched_by": "event_token_metric_rule",
+                    "scope": meta.get("scope") or MetricCandidateExtractor._infer_scope_from_category(meta.get("category")),
+                    "priority": meta.get("priority", 0)
+                })
+                seen.add("eventCount")
         param_probe_terms = ["파라미터", "매개변수", "네임", "이름", "name", "값", "없어", "있어", "menu_name", "menu name", "메뉴명", "메뉴 네임"]
         if event_token and any(k in q for k in param_probe_terms):
             if "eventCount" in seen:
@@ -580,6 +750,27 @@ class MetricCandidateExtractor:
                     "priority": meta.get("priority", 0)
                 })
                 seen.add("eventCount")
+
+        # 이벤트 클릭 발생량 질의는 eventCount를 강하게 우선
+        if any(k in q for k in ["클릭", "click"]) and any(k in q for k in ["얼마나", "몇", "건수", "횟수", "일어났", "발생"]):
+            if "eventCount" in seen:
+                for c in candidates:
+                    if c.get("name") == "eventCount":
+                        c["score"] = max(c.get("score", 0), 0.98)
+                        c["matched_by"] = "click_volume_rule"
+            else:
+                meta = GA4_METRICS.get("eventCount", {})
+                candidates.append({
+                    "name": "eventCount",
+                    "score": 0.98,
+                    "matched_by": "click_volume_rule",
+                    "scope": meta.get("scope") or MetricCandidateExtractor._infer_scope_from_category(meta.get("category")),
+                    "priority": meta.get("priority", 0)
+                })
+                seen.add("eventCount")
+            for c in candidates:
+                if c.get("name") in ["purchaseRevenue", "itemRevenue", "grossItemRevenue", "totalRevenue"]:
+                    c["score"] = max(0.0, c.get("score", 0) - 0.35)
 
         # 파라미터명이 직접 언급된 질문은 eventCount를 기본 지표로 사용
         if any(tok in q for tok in KNOWN_CUSTOM_PARAM_TOKENS):
@@ -738,6 +929,54 @@ class MetricCandidateExtractor:
                 })
                 seen.add(m_name)
 
+        # 일반 전환율 질의는 rate 계열 지표 우선
+        if any(k in q for k in ["전환율", "conversion rate", "전환 비율"]):
+            prefer_rates = {"sessionKeyEventRate": 0.98, "purchaserRate": 0.92, "purchaseToViewRate": 0.90}
+            for c in candidates:
+                n = c.get("name")
+                if n in prefer_rates:
+                    c["score"] = max(c.get("score", 0), prefer_rates[n])
+                    c["matched_by"] = "generic_conversion_rate_rule"
+                elif n in {"keyEvents", "eventCount", "activeUsers"}:
+                    c["score"] = max(0.0, c.get("score", 0) - 0.28)
+            for m_name, sc in prefer_rates.items():
+                if m_name in seen:
+                    continue
+                meta = GA4_METRICS.get(m_name, {})
+                scope = meta.get("scope") or MetricCandidateExtractor._infer_scope_from_category(meta.get("category"))
+                candidates.append({
+                    "name": m_name,
+                    "score": sc,
+                    "matched_by": "generic_conversion_rate_rule",
+                    "scope": scope,
+                    "priority": meta.get("priority", 0)
+                })
+                seen.add(m_name)
+
+        # 주간 비교(지난주 vs 그 전주) + 사용자 계열 질문은 activeUsers 우선
+        if ("지난주" in q and ("그 전주" in q or "전주" in q)) and any(k in q for k in ["사용자", "유저"]):
+            prefer = {"activeUsers": 0.995, "newUsers": 0.85}
+            for c in candidates:
+                n = c.get("name")
+                if n in prefer:
+                    c["score"] = max(c.get("score", 0), prefer[n])
+                    c["matched_by"] = "week_compare_users_rule"
+                elif n in {"eventCount", "keyEvents", "purchaseRevenue", "itemRevenue"}:
+                    c["score"] = max(0.0, c.get("score", 0) - 0.30)
+            for m_name, sc in prefer.items():
+                if m_name in seen:
+                    continue
+                meta = GA4_METRICS.get(m_name, {})
+                scope = meta.get("scope") or MetricCandidateExtractor._infer_scope_from_category(meta.get("category"))
+                candidates.append({
+                    "name": m_name,
+                    "score": sc,
+                    "matched_by": "week_compare_users_rule",
+                    "scope": scope,
+                    "priority": meta.get("priority", 0)
+                })
+                seen.add(m_name)
+
         # 엔티티 비교 질문인데 metric이 비어있을 때 기본 지표 보강
         has_entities = len(_extract_entity_terms(question)) > 0
         if has_entities and not candidates:
@@ -790,9 +1029,49 @@ class MetricCandidateExtractor:
                 })
                 seen.add("purchaseRevenue")
 
-        # "신규 구매자/후원자" 보정:
+        # 후원 이름/후원명 질의는 donation_name 축 이벤트 지표를 우선
+        if any(k in q for k in donation_name_tokens):
+            for m_name, sc in [("eventCount", 0.94), ("purchaseRevenue", 0.90)]:
+                if m_name in seen:
+                    for c in candidates:
+                        if c.get("name") == m_name:
+                            c["score"] = max(c.get("score", 0), sc)
+                            c["matched_by"] = "donation_name_axis_rule"
+                    continue
+                meta = GA4_METRICS.get(m_name, {})
+                scope = meta.get("scope") or MetricCandidateExtractor._infer_scope_from_category(meta.get("category"))
+                candidates.append({
+                    "name": m_name,
+                    "score": sc,
+                    "matched_by": "donation_name_axis_rule",
+                    "scope": scope,
+                    "priority": meta.get("priority", 0)
+                })
+                seen.add(m_name)
+
+        # 프로그램/후원명 + "얼마나" 질의는 매출/구매자 지표 우선
+        if any(k in q for k in ["프로그램", "노블클럽", "천원의 힘", "그린노블클럽", "추모기부"]) and any(k in q for k in ["얼마나", "몇", "후원했", "규모"]):
+            for m_name, sc in [("purchaseRevenue", 0.96), ("totalPurchasers", 0.90), ("transactions", 0.86)]:
+                if m_name in seen:
+                    for c in candidates:
+                        if c.get("name") == m_name:
+                            c["score"] = max(c.get("score", 0), sc)
+                            c["matched_by"] = "program_amount_rule"
+                    continue
+                meta = GA4_METRICS.get(m_name, {})
+                scope = meta.get("scope") or MetricCandidateExtractor._infer_scope_from_category(meta.get("category"))
+                candidates.append({
+                    "name": m_name,
+                    "score": sc,
+                    "matched_by": "program_amount_rule",
+                    "scope": scope,
+                    "priority": meta.get("priority", 0)
+                })
+                seen.add(m_name)
+
+        # "신규/처음 구매자/후원자" 보정:
         # 신규 사용자(newUsers)가 아니라 구매자 계열 지표를 우선한다.
-        has_new = any(k in question for k in ["신규", "새로운", "최초", "첫"])
+        has_new = any(k in question for k in ["신규", "새로운", "최초", "첫", "처음"])
         has_buyer = any(k in question for k in ["구매자", "구매", "후원자", "후원"])
         if has_new and has_buyer:
             buyer_priority = {
@@ -806,6 +1085,8 @@ class MetricCandidateExtractor:
                     c["score"] = max(c.get("score", 0), buyer_priority[n])
                     c["matched_by"] = "new_buyer_rule"
                 if n == "newUsers":
+                    c["score"] = max(0.0, c.get("score", 0) - 0.25)
+                if n == "activeUsers":
                     c["score"] = max(0.0, c.get("score", 0) - 0.25)
             for m_name, sc in buyer_priority.items():
                 if m_name in seen:
@@ -822,6 +1103,174 @@ class MetricCandidateExtractor:
                     "priority": meta.get("priority", 0)
                 })
                 seen.add(m_name)
+
+        # "첫 후원자/첫 구매자 몇 퍼센트"는 비율 지표를 최우선
+        percent_tokens = ["퍼센트", "percent", "%", "비율", "율"]
+        if has_new and has_buyer and any(k in q for k in percent_tokens):
+            prefer_rate = {
+                "firstTimePurchaserRate": 0.99,
+                "firstTimePurchasers": 0.93,
+                "totalPurchasers": 0.92,
+            }
+            for c in candidates:
+                n = c.get("name")
+                if n in prefer_rate:
+                    c["score"] = max(c.get("score", 0), prefer_rate[n])
+                    c["matched_by"] = "first_buyer_rate_rule"
+                elif n in {"activeUsers", "newUsers", "purchaseRevenue", "itemRevenue", "purchaserRate", "purchaseToViewRate"}:
+                    c["score"] = max(0.0, c.get("score", 0) - 0.30)
+            for m_name, sc in prefer_rate.items():
+                if m_name in seen:
+                    continue
+                meta = GA4_METRICS.get(m_name, {})
+                scope = meta.get("scope") or MetricCandidateExtractor._infer_scope_from_category(meta.get("category"))
+                candidates.append({
+                    "name": m_name,
+                    "score": sc,
+                    "matched_by": "first_buyer_rate_rule",
+                    "scope": scope,
+                    "priority": meta.get("priority", 0)
+                })
+                seen.add(m_name)
+
+        # "신규 후원자 비율"도 첫 구매자 비율로 정규화
+        if ("신규" in q) and has_buyer and any(k in q for k in percent_tokens):
+            for c in candidates:
+                n = c.get("name")
+                if n == "firstTimePurchaserRate":
+                    c["score"] = max(c.get("score", 0), 0.995)
+                    c["matched_by"] = "new_buyer_rate_rule"
+                elif n in {"purchaserRate", "purchaseToViewRate"}:
+                    c["score"] = max(0.0, c.get("score", 0) - 0.35)
+            if "firstTimePurchaserRate" not in seen:
+                meta = GA4_METRICS.get("firstTimePurchaserRate", {})
+                scope = meta.get("scope") or MetricCandidateExtractor._infer_scope_from_category(meta.get("category"))
+                candidates.append({
+                    "name": "firstTimePurchaserRate",
+                    "score": 0.995,
+                    "matched_by": "new_buyer_rate_rule",
+                    "scope": scope,
+                    "priority": meta.get("priority", 0)
+                })
+                seen.add("firstTimePurchaserRate")
+
+        # "사용자수 + 구매한 사용자" 복합 질의는 activeUsers + totalPurchasers를 모두 제공
+        if any(k in q for k in ["사용자수", "사용자 수", "활성 사용자", "사용자"]) and any(k in q for k in ["구매한 사용자", "구매 사용자", "구매자", "후원자", "구매한"]):
+            pair_priority = {"activeUsers": 0.95, "totalPurchasers": 0.96}
+            for c in candidates:
+                n = c.get("name")
+                if n in pair_priority:
+                    c["score"] = max(c.get("score", 0), pair_priority[n])
+                    c["matched_by"] = "user_and_purchaser_rule"
+                elif n in {"transactions", "itemRevenue", "purchaseRevenue"}:
+                    c["score"] = max(0.0, c.get("score", 0) - 0.25)
+            for m_name, sc in pair_priority.items():
+                if m_name in seen:
+                    continue
+                meta = GA4_METRICS.get(m_name, {})
+                scope = meta.get("scope") or MetricCandidateExtractor._infer_scope_from_category(meta.get("category"))
+                candidates.append({
+                    "name": m_name,
+                    "score": sc,
+                    "matched_by": "user_and_purchaser_rule",
+                    "scope": scope,
+                    "priority": meta.get("priority", 0)
+                })
+                seen.add(m_name)
+
+        # "채널/소스/매체 + 구매자수" 질의는 구매자 지표 우선 (매출 지표는 후순위)
+        if any(k in q for k in ["채널", "소스", "매체", "유입", "경로"]) and any(k in q for k in ["구매자수", "구매자 수", "구매자", "후원자"]):
+            prefer_buyers = {"totalPurchasers": 0.99, "firstTimePurchasers": 0.90}
+            for c in candidates:
+                n = c.get("name")
+                if n in prefer_buyers:
+                    c["score"] = max(c.get("score", 0), prefer_buyers[n])
+                    c["matched_by"] = "acq_buyer_count_rule"
+                elif n in {"purchaseRevenue", "itemRevenue", "grossItemRevenue", "totalRevenue"}:
+                    c["score"] = max(0.0, c.get("score", 0) - 0.35)
+            for m_name, sc in prefer_buyers.items():
+                if m_name in seen:
+                    continue
+                meta = GA4_METRICS.get(m_name, {})
+                scope = meta.get("scope") or MetricCandidateExtractor._infer_scope_from_category(meta.get("category"))
+                candidates.append({
+                    "name": m_name,
+                    "score": sc,
+                    "matched_by": "acq_buyer_count_rule",
+                    "scope": scope,
+                    "priority": meta.get("priority", 0)
+                })
+                seen.add(m_name)
+
+        # "매출 일으킨 사용자"는 구매자 수 질의로 해석
+        if any(k in q for k in ["매출 일으킨", "구매를 일으킨", "구매 일으킨"]) and any(k in q for k in ["사용자", "유저", "사람"]):
+            prefer_buyers = {"totalPurchasers": 0.995, "firstTimePurchasers": 0.90}
+            for c in candidates:
+                n = c.get("name")
+                if n in prefer_buyers:
+                    c["score"] = max(c.get("score", 0), prefer_buyers[n])
+                    c["matched_by"] = "revenue_contributor_user_rule"
+                elif n in {"purchaseRevenue", "itemRevenue", "grossItemRevenue"}:
+                    c["score"] = max(0.0, c.get("score", 0) - 0.35)
+            for m_name, sc in prefer_buyers.items():
+                if m_name in seen:
+                    continue
+                meta = GA4_METRICS.get(m_name, {})
+                scope = meta.get("scope") or MetricCandidateExtractor._infer_scope_from_category(meta.get("category"))
+                candidates.append({
+                    "name": m_name,
+                    "score": sc,
+                    "matched_by": "revenue_contributor_user_rule",
+                    "scope": scope,
+                    "priority": meta.get("priority", 0)
+                })
+                seen.add(m_name)
+
+        # "구매수 + 전체 구매자" 복합 질의는 transactions + totalPurchasers를 모두 제공
+        if any(k in q for k in ["와", "과", ","]) and any(k in q for k in ["구매수", "구매 건수", "구매건수", "트랜잭션"]) and any(k in q for k in ["전체 구매자", "구매자", "후원자"]):
+            pair_priority = {"transactions": 0.98, "totalPurchasers": 0.97}
+            for c in candidates:
+                n = c.get("name")
+                if n in pair_priority:
+                    c["score"] = max(c.get("score", 0), pair_priority[n])
+                    c["matched_by"] = "purchase_count_and_total_purchasers_rule"
+                elif n in {"activeUsers", "newUsers"}:
+                    c["score"] = max(0.0, c.get("score", 0) - 0.20)
+            for m_name, sc in pair_priority.items():
+                if m_name in seen:
+                    continue
+                meta = GA4_METRICS.get(m_name, {})
+                scope = meta.get("scope") or MetricCandidateExtractor._infer_scope_from_category(meta.get("category"))
+                candidates.append({
+                    "name": m_name,
+                    "score": sc,
+                    "matched_by": "purchase_count_and_total_purchasers_rule",
+                    "scope": scope,
+                    "priority": meta.get("priority", 0)
+                })
+                seen.add(m_name)
+
+        # "전체 항목/프로그램/메뉴" 질문에서 totalUsers 계열 과매칭 억제
+        list_query_terms = [
+            "전체 항목", "전체 목록", "전체 프로그램", "프로그램 전체",
+            "메뉴 전체", "전체 보여", "전부 보여", "다 보여"
+        ]
+        if any(t in q for t in list_query_terms) and not any(t in q for t in ["사용자", "유저", "user"]):
+            for c in candidates:
+                if c.get("name") in {"totalUsers", "activeUsers", "newUsers"}:
+                    c["score"] = 0.0
+            if any(k in q for k in ["클릭", "click", "메뉴", "프로그램", "이벤트"]) and "eventCount" not in seen:
+                meta = GA4_METRICS.get("eventCount", {})
+                candidates.append({
+                    "name": "eventCount",
+                    "score": 0.88,
+                    "matched_by": "list_query_event_bias_rule",
+                    "scope": meta.get("scope") or MetricCandidateExtractor._infer_scope_from_category(meta.get("category")),
+                    "priority": meta.get("priority", 0)
+                })
+                seen.add("eventCount")
+
+        candidates = [c for c in candidates if c.get("score", 0) > 0]
         
         # Score 기준 정렬
         candidates.sort(key=lambda x: x["score"], reverse=True)
@@ -978,6 +1427,46 @@ class DimensionCandidateExtractor:
                     "priority": GA4_DIMENSIONS.get("customEvent:is_regular_donation", {}).get("priority", 0)
                 })
 
+        # 후원유형 매출 질문은 정기후원 여부 차원 우선
+        if any(k in q for k in ["후원 유형", "후원유형"]) and any(k in q for k in ["매출", "수익", "revenue", "금액"]):
+            if not any(c.get("name") == "customEvent:is_regular_donation" for c in candidates):
+                candidates.append({
+                    "name": "customEvent:is_regular_donation",
+                    "score": 0.97,
+                    "matched_by": "donation_type_revenue_dim_rule",
+                    "scope": "event",
+                    "category": "event",
+                    "priority": GA4_DIMENSIONS.get("customEvent:is_regular_donation", {}).get("priority", 0)
+                })
+            if not any(c.get("name") == "customEvent:donation_name" for c in candidates):
+                candidates.append({
+                    "name": "customEvent:donation_name",
+                    "score": 0.90,
+                    "matched_by": "donation_type_revenue_dim_rule",
+                    "scope": "event",
+                    "category": "event",
+                    "priority": GA4_DIMENSIONS.get("customEvent:donation_name", {}).get("priority", 0)
+                })
+
+        # 일반 "유형" 후속 질문은 후원명/상품유형 우선 (Y/N 단독 응답 방지)
+        if any(k in q for k in ["유형", "타입", "종류"]) and not any(k in q for k in ["채널", "소스", "매체", "디바이스", "국가", "페이지"]):
+            prefer_dims = [("customEvent:donation_name", 0.97), ("itemCategory", 0.93), ("customEvent:is_regular_donation", 0.86)]
+            if any(k in q for k in ["상품", "카테고리", "item"]):
+                prefer_dims = [("itemCategory", 0.98), ("customEvent:donation_name", 0.90), ("customEvent:is_regular_donation", 0.82)]
+            if any(k in q for k in ["후원 이름", "후원이름", "후원명", "donation_name", "이름"]):
+                prefer_dims = [("customEvent:donation_name", 0.99), ("itemCategory", 0.90), ("customEvent:is_regular_donation", 0.82)]
+            for d_name, sc in prefer_dims:
+                if d_name in GA4_DIMENSIONS and not any(c.get("name") == d_name for c in candidates):
+                    meta = GA4_DIMENSIONS.get(d_name, {})
+                    candidates.append({
+                        "name": d_name,
+                        "score": sc,
+                        "matched_by": "generic_type_followup_rule",
+                        "scope": meta.get("scope") or DimensionCandidateExtractor._infer_scope_from_category(meta.get("category")),
+                        "category": meta.get("category"),
+                        "priority": meta.get("priority", 0)
+                    })
+
         # 메뉴명/메뉴 네임 질의는 customEvent:menu_name 우선
         if any(k in q for k in ["menu_name", "menu name", "메뉴명", "메뉴 네임", "메뉴이름"]):
             if not any(c.get("name") == "customEvent:menu_name" for c in candidates):
@@ -990,6 +1479,52 @@ class DimensionCandidateExtractor:
                     "priority": GA4_DIMENSIONS.get("customEvent:menu_name", {}).get("priority", 0)
                 })
 
+        # 상품유형/상품 카테고리 질의는 itemCategory 우선
+        if any(k in q for k in ["상품유형", "상품 유형", "상품 카테고리", "카테고리별 상품", "유형별 상품"]):
+            if not any(c.get("name") == "itemCategory" for c in candidates):
+                candidates.append({
+                    "name": "itemCategory",
+                    "score": 0.98,
+                    "matched_by": "item_category_rule",
+                    "scope": "item",
+                    "category": "ecommerce",
+                    "priority": GA4_DIMENSIONS.get("itemCategory", {}).get("priority", 0)
+                })
+
+        # 상품 랭킹/최고 매출 질문은 itemName 우선
+        if any(k in q for k in ["상품"]) and any(k in q for k in ["가장", "최고", "최저", "높은", "낮은", "1위", "top", "상위"]):
+            if not any(c.get("name") == "itemName" for c in candidates):
+                candidates.append({
+                    "name": "itemName",
+                    "score": 0.99,
+                    "matched_by": "item_ranking_rule",
+                    "scope": "item",
+                    "category": "ecommerce",
+                    "priority": GA4_DIMENSIONS.get("itemName", {}).get("priority", 0)
+                })
+
+        # 소스/매체/광고 유입 질문은 sourceMedium 우선
+        if any(k in q for k in ["소스", "매체", "source", "medium", "광고"]):
+            if not any(c.get("name") == "sourceMedium" for c in candidates):
+                candidates.append({
+                    "name": "sourceMedium",
+                    "score": 0.97,
+                    "matched_by": "source_medium_rule",
+                    "scope": "event",
+                    "category": "traffic",
+                    "priority": GA4_DIMENSIONS.get("sourceMedium", {}).get("priority", 0)
+                })
+        if any(k in q for k in ["paid", "display", "direct", "organic", "referral", "unassigned", "cross-network"]):
+            if not any(c.get("name") == "defaultChannelGroup" for c in candidates):
+                candidates.append({
+                    "name": "defaultChannelGroup",
+                    "score": 0.96,
+                    "matched_by": "channel_token_rule",
+                    "scope": "event",
+                    "category": "traffic",
+                    "priority": GA4_DIMENSIONS.get("defaultChannelGroup", {}).get("priority", 0)
+                })
+
         # 후원유형 + 클릭수는 donation_name 우선
         if any(k in q for k in ["후원유형", "후원 유형", "후원명"]) and any(k in q for k in ["클릭", "click"]):
             if not any(c.get("name") == "customEvent:donation_name" for c in candidates):
@@ -997,6 +1532,18 @@ class DimensionCandidateExtractor:
                     "name": "customEvent:donation_name",
                     "score": 0.96,
                     "matched_by": "donation_click_dim_rule",
+                    "scope": "event",
+                    "category": "event",
+                    "priority": GA4_DIMENSIONS.get("customEvent:donation_name", {}).get("priority", 0)
+                })
+
+        # donation + click 질의는 donation_name 축 우선
+        if "donation" in q and any(k in q for k in ["클릭", "click"]):
+            if not any(c.get("name") == "customEvent:donation_name" for c in candidates):
+                candidates.append({
+                    "name": "customEvent:donation_name",
+                    "score": 0.98,
+                    "matched_by": "donation_token_click_dim_rule",
                     "scope": "event",
                     "category": "event",
                     "priority": GA4_DIMENSIONS.get("customEvent:donation_name", {}).get("priority", 0)
@@ -1104,19 +1651,37 @@ class ModifierExtractor:
         ]
         
         # 1. TopN limit
-        limit_match = re.search(r'(top\s*(\d+)|상위\s*(\d+)|(\d+)위|1-(\d+)|(\d+)개)', q)
+        limit_match = re.search(r'(top\s*(\d+)|상위\s*(\d+)|(\d+)\s*위|1\s*[-~]\s*(\d+)|(\d+)\s*개)', q)
         if limit_match:
             # 매칭된 그룹에서 숫자 추출
             nums = [g for g in limit_match.groups() if g and g.isdigit()]
             if nums:
                 modifiers["limit"] = int(nums[0])
+
+        # "가장/최고/최저"는 Top1로 해석
+        if any(k in q for k in ["가장", "최고", "최저", "높은", "낮은"]) and any(k in q for k in ["상품", "매출", "이벤트", "후원"]):
+            modifiers["limit"] = 1
         
         # 2. "총" / "전체" 키워드
         if any(k in q for k in ["총", "전체", "합계", "total"]):
             modifiers["needs_total"] = True
 
+        # "총 매출 + 상품별 매출" 복합 질의
+        if any(k in q for k in ["총 매출", "총매출", "전체 매출"]) and any(k in q for k in ["상품별", "상품 별", "아이템별", "제품별"]):
+            modifiers["needs_total"] = True
+            modifiers["needs_breakdown"] = True
+            modifiers["scope_hint"] = ["item"]
+
+        # "상품별 매출" 단독 질의도 itemName 분해 강제
+        if any(k in q for k in ["상품별", "상품 별", "아이템별", "제품별"]) and any(k in q for k in ["매출", "수익", "금액"]):
+            modifiers["needs_breakdown"] = True
+            modifiers["needs_total"] = False if "총 매출" not in q and "총매출" not in q else modifiers.get("needs_total", False)
+            modifiers["scope_hint"] = ["item"]
+            modifiers["force_dimensions"] = ["itemName"]
+            modifiers["entity_field_hint"] = "itemName"
+
         # 2.1 "전체 항목/목록"은 합계가 아니라 전체 breakdown 확장으로 해석
-        if any(k in q for k in ["전체 항목", "전체 목록", "전체 프로그램", "모든 항목", "전부 보여", "다 보여", "메뉴 전체", "gnb메뉴 전체"]):
+        if any(k in q for k in ["전체 항목", "전체 목록", "전체 프로그램", "모든 항목", "전부 보여", "다 보여", "메뉴 전체", "gnb메뉴 전체", "전체 보여줘", "이것 전체", "이거 전체"]):
             modifiers["all_items"] = True
             modifiers["needs_breakdown"] = True
             modifiers["needs_total"] = False
@@ -1128,12 +1693,22 @@ class ModifierExtractor:
         if any(k in q for k in ["묶어서", "묶어", "그룹", "group by"]):
             modifiers["needs_breakdown"] = True
             modifiers["needs_total"] = False
+        if len(q.strip()) <= 20 and any(k in q for k in ["name", "이름", "네임"]):
+            modifiers["needs_breakdown"] = True
+            modifiers["needs_total"] = False
 
         # 3.1 비교/탐색형 자연어는 breakdown
         if any(k in q for k in ["어떤", "무슨", "어디", "가장", "많이", "상위", "top"]) and any(k in q for k in ["후원", "프로그램", "국가", "채널", "카테고리", "유형"]):
             modifiers["needs_breakdown"] = True
             if any(k in q for k in ["가장", "많이"]) and not any(k in q for k in ["top", "상위"]):
                 modifiers["limit"] = 5
+        if any(k in q for k in ["가장", "최고", "최저", "높은", "낮은", "1위"]) and any(k in q for k in ["상품", "매출", "후원"]):
+            modifiers["needs_breakdown"] = True
+            modifiers["needs_total"] = True
+            modifiers["scope_hint"] = ["item"]
+            modifiers["force_dimensions"] = ["itemName"]
+            modifiers["entity_field_hint"] = "itemName"
+            modifiers["limit"] = 1
         if "국가" in q and any(k in q for k in ["많이", "어디", "어떤"]):
             modifiers["needs_breakdown"] = True
 
@@ -1151,10 +1726,113 @@ class ModifierExtractor:
         if any(k in q for k in ["비중", "구성비", "비율", "점유율", "나눠줘", "나눠"]):
             modifiers["needs_breakdown"] = True
 
+        # 지난달+이번달 / 지난주+이번주 비교 질의는 시간 차원 breakdown 강제
+        if ("지난달" in q and "이번달" in q):
+            modifiers["needs_breakdown"] = True
+            modifiers["needs_total"] = False
+            modifiers["scope_hint"] = ["event"]
+            modifiers["force_dimensions"] = ["yearMonth"]
+        if ("지난주" in q and "이번주" in q):
+            modifiers["needs_breakdown"] = True
+            modifiers["needs_total"] = False
+            modifiers["scope_hint"] = ["event"]
+            modifiers["force_dimensions"] = ["week"]
+        if ("지난주" in q and ("그 전주" in q or "전주" in q)) and any(k in q for k in ["사용자", "유저", "세션"]):
+            modifiers["needs_trend"] = True
+            modifiers["needs_breakdown"] = True
+            modifiers["needs_total"] = False
+            modifiers["scope_hint"] = ["event"]
+            # 추이는 일별 날짜 축을 기본으로 유지한다.
+            modifiers["force_dimensions"] = ["date"]
+            modifiers["force_metrics"] = ["activeUsers"]
+
+        # 추이 질문은 기본적으로 일별(date) 차원 강제
+        if any(k in q for k in ["추이", "흐름", "일별", "변화"]) and "force_dimensions" not in modifiers:
+            modifiers["needs_trend"] = True
+            modifiers["needs_breakdown"] = True
+            modifiers["needs_total"] = False
+            modifiers["scope_hint"] = ["event"]
+            modifiers["force_dimensions"] = ["date"]
+        if any(k in q for k in ["전환율", "conversion rate", "전환 비율"]):
+            modifiers["force_metrics"] = ["sessionKeyEventRate", "purchaserRate", "purchaseToViewRate"]
+        if q.strip() in ["비교", "비교해", "비교해서", "대비", "증감"]:
+            modifiers["needs_breakdown"] = True
+            modifiers["needs_total"] = False
+
+        # 3.55 채널/소스/매체 축 요청은 breakdown 강제
+        if any(k in q for k in ["채널", "소스", "매체", "경로", "source", "medium", "광고", "paid", "display"]):
+            modifiers["needs_breakdown"] = True
+            modifiers["scope_hint"] = ["event"]
+            if any(k in q for k in ["소스", "매체", "source", "medium", "광고"]) and "force_dimensions" not in modifiers:
+                modifiers["force_dimensions"] = ["sourceMedium"]
+            elif ("경로" in q) and "force_dimensions" not in modifiers:
+                modifiers["force_dimensions"] = ["defaultChannelGroup"]
+
+        # 3.555 채널/소스/매체 + 구매자수 질문은 구매자 지표 강제
+        if any(k in q for k in ["채널", "소스", "매체", "유입", "경로"]) and any(k in q for k in ["구매자수", "구매자 수", "구매자", "후원자"]):
+            modifiers["needs_breakdown"] = True
+            modifiers["needs_total"] = False
+            modifiers["scope_hint"] = ["event"]
+            modifiers["force_metrics"] = ["totalPurchasers"]
+
+        # 3.553 "매출 일으킨 사용자"는 채널별 구매자수로 강제
+        if any(k in q for k in ["매출 일으킨", "구매를 일으킨", "구매 일으킨"]) and any(k in q for k in ["사용자", "유저", "사람"]) and any(k in q for k in ["채널", "유입", "경로"]):
+            modifiers["needs_breakdown"] = True
+            modifiers["needs_total"] = False
+            modifiers["scope_hint"] = ["event"]
+            modifiers["force_metrics"] = ["totalPurchasers"]
+            modifiers["force_dimensions"] = ["defaultChannelGroup"]
+            modifiers["event_filter"] = "purchase"
+
+        # 3.552 유입축 + 구매/매출 질문은 purchase 필터 기반 분해
+        if any(k in q for k in ["채널", "소스", "매체", "유입", "경로", "source", "medium"]) and any(k in q for k in ["구매", "매출", "수익", "후원"]):
+            modifiers["needs_breakdown"] = True
+            modifiers["needs_total"] = False
+            modifiers["scope_hint"] = ["event"]
+            if any(k in q for k in ["소스", "매체", "source", "medium"]):
+                modifiers["force_dimensions"] = ["sourceMedium"]
+            else:
+                modifiers["force_dimensions"] = ["defaultChannelGroup"]
+            modifiers["event_filter"] = "purchase"
+
+        # 3.551 사용자수 + 구매자 복합 질의는 2개 지표를 고정
+        if any(k in q for k in ["사용자수", "사용자 수", "활성 사용자", "사용자"]) and any(k in q for k in ["구매한 사용자", "구매 사용자", "구매자", "후원자", "구매한"]):
+            modifiers["scope_hint"] = ["event"]
+            modifiers["force_metrics"] = ["activeUsers", "totalPurchasers"]
+
+        # 3.551b 구매수 + 전체 구매자 복합 질의
+        if any(k in q for k in ["구매수", "구매 건수", "구매건수", "트랜잭션"]) and any(k in q for k in ["전체 구매자", "구매자", "후원자"]) and any(k in q for k in ["와", "과", ","]):
+            modifiers["scope_hint"] = ["event"]
+            modifiers["force_metrics"] = ["transactions", "totalPurchasers"]
+            modifiers["needs_total"] = True
+            modifiers["needs_breakdown"] = False
+            modifiers["suppress_entity_filters"] = True
+            modifiers.pop("entity_contains", None)
+            modifiers.pop("item_name_contains", None)
+
+        # "어떤 경로에서 ... 구매를 많이"는 구매자 지표 우선
+        if "경로" in q and any(k in q for k in ["구매", "후원"]) and any(k in q for k in ["사용자", "유저", "사람"]):
+            modifiers["scope_hint"] = ["event"]
+            modifiers["force_metrics"] = ["totalPurchasers"]
+            modifiers["needs_breakdown"] = True
+            modifiers["needs_total"] = False
+            if "force_dimensions" not in modifiers:
+                modifiers["force_dimensions"] = ["defaultChannelGroup"]
+            modifiers["event_filter"] = "purchase"
+
+        product_type_query = any(k in q for k in ["상품유형", "상품 유형", "상품 카테고리", "카테고리별 상품"]) or ("상품" in q and "유형" in q)
+        # 3.56 상품유형 질의는 itemCategory 기준 breakdown 강제
+        if product_type_query:
+            modifiers["needs_breakdown"] = True
+            modifiers["needs_total"] = False
+            modifiers["scope_hint"] = ["item"]
+            modifiers["force_dimensions"] = ["itemCategory"]
+            modifiers["entity_field_hint"] = "itemCategory"
+
         # 3.6 엔티티 추출: 브랜드/캠페인/상품명/후원명 등 contains 필터
         domestic_overseas_case = ("해외" in q and "국내" in q)
         entity_terms = _extract_entity_terms(question)
-        if entity_terms and not domestic_overseas_case:
+        if entity_terms and not domestic_overseas_case and not modifiers.get("suppress_entity_filters"):
             uniq = []
             seen = set()
             for t in entity_terms:
@@ -1174,7 +1852,10 @@ class ModifierExtractor:
                     elif any(k in q for k in ["채널"]):
                         modifiers["entity_field_hint"] = "defaultChannelGroup"
                     elif any(k in q for k in ["소스", "매체"]):
-                        modifiers["entity_field_hint"] = "sourceMedium"
+                        if any(t in q for t in ["display", "paid", "organic", "direct", "referral", "unassigned", "cross-network"]):
+                            modifiers["entity_field_hint"] = "defaultChannelGroup"
+                        else:
+                            modifiers["entity_field_hint"] = "sourceMedium"
                     elif any(k in q for k in ["랜딩", "페이지"]):
                         modifiers["entity_field_hint"] = "landingPage"
                     elif any(k in q for k in ["이벤트"]):
@@ -1182,10 +1863,19 @@ class ModifierExtractor:
                     if "event" not in scope_hint:
                         scope_hint.append("event")
                 else:
-                    modifiers["entity_field_hint"] = "itemBrand" if any(k in q for k in ["브랜드"]) else "itemName"
+                    if "entity_field_hint" not in modifiers:
+                        modifiers["entity_field_hint"] = "itemBrand" if any(k in q for k in ["브랜드"]) else "itemName"
                     if "item" not in scope_hint:
                         scope_hint.append("item")
                 modifiers["scope_hint"] = scope_hint
+
+        # source/medium 분석에서 채널 토큰(display/paid/organic...)이 있으면
+        # 분해는 sourceMedium으로, 필터는 defaultChannelGroup으로 고정
+        if any(k in q for k in ["소스", "매체", "source", "medium"]) and any(t in q for t in ["display", "paid", "organic", "direct", "referral", "unassigned", "cross-network"]):
+            modifiers["needs_breakdown"] = True
+            modifiers["scope_hint"] = ["event"]
+            modifiers["force_dimensions"] = ["sourceMedium"]
+            modifiers["entity_field_hint"] = "defaultChannelGroup"
 
         # 3.7 "매개변수/정보" 요청이면 item 프로파일용 차원 강제
         if any(k in q for k in ["매개변수", "파라미터", "상세", "정보", "어떤 것을 더 알 수", "무엇을 더 알 수"]):
@@ -1196,6 +1886,11 @@ class ModifierExtractor:
         # 3.75 이벤트 클릭 항목 탐색 (e.g., gnb_click 어떤 항목 많이?)
         event_token = _extract_event_name_token(question)
         click_terms = ["클릭", "눌", "tap", "click"]
+
+        # 후원 클릭 명시 질의는 donation_click으로 정규화
+        if ("후원" in q and "클릭" in q) and not event_token:
+            event_token = "donation_click"
+
         if any(k in q for k in click_terms) and any(k in q for k in ["항목", "무엇", "뭐", "어떤", "많이", "상위"]):
             modifiers["needs_breakdown"] = True
             modifiers["needs_total"] = False
@@ -1210,6 +1905,19 @@ class ModifierExtractor:
                 modifiers["event_filter"] = event_token
             if "entity_field_hint" not in modifiers:
                 modifiers["entity_field_hint"] = "linkText"
+
+        # 클릭 발생량 질문은 eventCount + eventName 분해
+        if any(k in q for k in click_terms) and any(k in q for k in ["얼마나", "몇", "건수", "횟수", "일어났"]):
+            modifiers["needs_breakdown"] = True
+            modifiers["needs_total"] = False
+            modifiers["scope_hint"] = ["event"]
+            force_dims = modifiers.get("force_dimensions", [])
+            for d in ["eventName"]:
+                if d in GA4_DIMENSIONS and d not in force_dims:
+                    force_dims.append(d)
+            modifiers["force_dimensions"] = force_dims
+            if event_token:
+                modifiers["event_filter"] = event_token
 
         # 3.76 이벤트명 + 메뉴명(파라미터) 조회
         if event_token and any(k in q for k in ["menu_name", "menu name", "메뉴명", "메뉴 네임", "메뉴이름"]):
@@ -1250,15 +1958,15 @@ class ModifierExtractor:
             "referrer_pathname": ["referrer_pathname", "리퍼러 경로", "유입경로"],
             "step": ["step", "스텝", "단계"],
             "sub_category": ["sub_category", "서브카테고리"],
-            "domestic_children_count": ["domestic_children_count", "국내아동수", "국내아동"],
-            "overseas_children_count": ["overseas_children_count", "해외아동수", "해외아동"],
+            "domestic_children_count": ["domestic_children_count", "국내아동수"],
+            "overseas_children_count": ["overseas_children_count", "해외아동수"],
         }
         selected_param = None
         for param_name, aliases in explicit_param_map.items():
             if any(a in q for a in aliases):
                 selected_param = param_name
                 break
-        if selected_param:
+        if selected_param and not product_type_query:
             modifiers["needs_breakdown"] = True
             modifiers["needs_total"] = False
             modifiers["scope_hint"] = ["event"]
@@ -1267,9 +1975,12 @@ class ModifierExtractor:
             modifiers["entity_field_hint"] = force_dim if force_dim in GA4_DIMENSIONS else "eventName"
             if event_token:
                 modifiers["event_filter"] = event_token
+            if selected_param in {"donation_name", "menu_name"} and any(k in q for k in ["묶어서", "묶어", "별", "기준"]):
+                if force_dim in GA4_DIMENSIONS:
+                    modifiers["force_dimensions"] = [force_dim]
 
         # 3.78 후원유형 클릭수는 donation_click 기준으로 분해
-        if any(k in q for k in ["후원유형", "후원 유형", "후원명"]) and any(k in q for k in ["클릭수", "클릭", "click"]):
+        if any(k in q for k in ["후원유형", "후원 유형", "후원명"]) and any(k in q for k in ["클릭수", "클릭", "click"]) and not any(k in q for k in ["매출", "수익", "금액", "revenue"]):
             modifiers["needs_breakdown"] = True
             modifiers["needs_total"] = False
             modifiers["scope_hint"] = ["event"]
@@ -1280,6 +1991,67 @@ class ModifierExtractor:
             modifiers["force_dimensions"] = force_dims
             modifiers["event_filter"] = "donation_click"
             modifiers["entity_field_hint"] = "customEvent:donation_name"
+
+        if "donation" in q and any(k in q for k in ["클릭", "click"]):
+            modifiers["needs_breakdown"] = True
+            modifiers["needs_total"] = False
+            modifiers["scope_hint"] = ["event"]
+            modifiers["event_filter"] = "donation_click"
+            modifiers["force_dimensions"] = ["customEvent:donation_name"]
+            modifiers["entity_field_hint"] = "customEvent:donation_name"
+
+        # "정기후원의 클릭수" 류 질의도 donation_click 기준으로 강제
+        if re.search(r"[가-힣A-Za-z0-9_]+후원", question) and any(k in q for k in ["클릭수", "클릭", "click"]) and not any(k in q for k in ["메뉴", "gnb", "lnb", "footer"]):
+            modifiers["needs_breakdown"] = True
+            modifiers["needs_total"] = False
+            modifiers["scope_hint"] = ["event"]
+            modifiers["event_filter"] = "donation_click"
+            force_dims = modifiers.get("force_dimensions", [])
+            for d in ["customEvent:donation_name"]:
+                if d in GA4_DIMENSIONS and d not in force_dims:
+                    force_dims.append(d)
+            modifiers["force_dimensions"] = force_dims
+            modifiers["force_metrics"] = ["eventCount"]
+            modifiers["entity_field_hint"] = "customEvent:donation_name"
+
+        # 3.78b 후원유형 매출은 purchase + 정기후원여부로 분해
+        if any(k in q for k in ["후원유형", "후원 유형"]) and any(k in q for k in ["매출", "수익", "금액", "revenue"]):
+            modifiers["needs_breakdown"] = True
+            modifiers["needs_total"] = False
+            modifiers["scope_hint"] = ["event"]
+            modifiers["event_filter"] = "purchase"
+            modifiers["force_dimensions"] = ["customEvent:is_regular_donation"]
+            modifiers["entity_field_hint"] = "customEvent:is_regular_donation"
+
+        # 이벤트 종류/목록은 eventName 기준으로 강제
+        if any(k in q for k in ["이벤트 종류", "이벤트 목록", "무슨 이벤트", "어떤 이벤트"]):
+            modifiers["needs_breakdown"] = True
+            modifiers["needs_total"] = False
+            modifiers["scope_hint"] = ["event"]
+            modifiers["force_dimensions"] = ["eventName"]
+            modifiers["force_metrics"] = ["eventCount"]
+            modifiers["entity_field_hint"] = "eventName"
+
+        # 3.78c 일반 "유형" 후속 질문은 유형 차원 breakdown으로 유도
+        if any(k in q for k in ["유형", "타입", "종류"]) and not any(k in q for k in ["채널", "소스", "매체", "디바이스", "국가", "페이지"]) and "force_dimensions" not in modifiers:
+            modifiers["needs_breakdown"] = True
+            modifiers["needs_total"] = False
+            modifiers["scope_hint"] = ["event"]
+            if any(k in q for k in ["매출", "수익", "구매", "후원"]):
+                modifiers["event_filter"] = "purchase"
+            if any(k in q for k in ["후원 이름", "후원이름", "후원명", "donation_name", "이름"]) and "customEvent:donation_name" in GA4_DIMENSIONS:
+                modifiers["force_dimensions"] = ["customEvent:donation_name"]
+                modifiers["entity_field_hint"] = "customEvent:donation_name"
+            elif any(k in q for k in ["상품", "카테고리", "item"]) and "itemCategory" in GA4_DIMENSIONS:
+                modifiers["force_dimensions"] = ["itemCategory"]
+                modifiers["entity_field_hint"] = "itemCategory"
+            elif "customEvent:donation_name" in GA4_DIMENSIONS:
+                modifiers["force_dimensions"] = ["customEvent:donation_name"]
+                modifiers["entity_field_hint"] = "customEvent:donation_name"
+
+        # 3.905 첫 후원자/첫 구매자 비율 질문은 비율 지표 중심
+        if any(k in q for k in ["첫", "최초", "처음", "신규"]) and any(k in q for k in ["후원자", "구매자"]) and any(k in q for k in ["퍼센트", "percent", "%", "비율", "율"]):
+            modifiers["force_metrics"] = ["firstTimePurchaserRate", "firstTimePurchasers", "totalPurchasers"]
 
         # 3.79 scroll 질의: 이벤트/퍼센트(페이지별이면 pagePath 포함)
         if any(k in q for k in ["스크롤", "scroll"]):
@@ -1305,8 +2077,21 @@ class ModifierExtractor:
             modifiers["scope_hint"] = ["event"]
             modifiers["event_filter"] = event_token
 
+        # 3.81 purchase vs donation_click 동시 비교 (donation_name 기준)
+        if "donation_click" in q and any(k in q for k in ["purchase", "구매"]) and any(k in q for k in ["donation_name", "후원명", "name", "구분"]):
+            modifiers["needs_breakdown"] = True
+            modifiers["needs_total"] = False
+            modifiers["scope_hint"] = ["event"]
+            modifiers["event_filters"] = ["purchase", "donation_click"]
+            modifiers["force_dimensions"] = ["eventName", "customEvent:donation_name"]
+            modifiers["entity_field_hint"] = "eventName"
+            modifiers["suppress_purchase_param_rule"] = True
+            modifiers.pop("event_filter", None)
+            modifiers.pop("entity_contains", None)
+            modifiers.pop("item_name_contains", None)
+
         # 3.8 purchase 커스텀 파라미터 조회
-        if any(k in q for k in ["purchase", "구매", "후원"]) and any(k in q for k in ["매개변수", "파라미터", "parameter"] + purchase_param_aliases):
+        if (not modifiers.get("suppress_purchase_param_rule")) and any(k in q for k in ["purchase", "구매", "후원"]) and any(k in q for k in ["매개변수", "파라미터", "parameter"] + purchase_param_aliases):
             modifiers["needs_breakdown"] = True
             modifiers["entity_field_hint"] = "eventName"
             modifiers["event_filter"] = "purchase"
@@ -1343,14 +2128,10 @@ class ModifierExtractor:
         # 3.9 "어떤 후원 이름으로 매출" -> donation_name x purchaseRevenue
         donation_name_tokens = ["후원 이름", "후원명", "donation_name"]
         revenue_tokens = ["매출", "수익", "revenue", "금액"]
-        if any(k in q for k in donation_name_tokens) and any(k in q for k in revenue_tokens):
+        if (not modifiers.get("event_filters")) and any(k in q for k in donation_name_tokens) and any(k in q for k in revenue_tokens):
             modifiers["needs_breakdown"] = True
             modifiers["event_filter"] = "purchase"
-            force_dims = modifiers.get("force_dimensions", [])
-            for d in ["customEvent:donation_name"]:
-                if d not in force_dims:
-                    force_dims.append(d)
-            modifiers["force_dimensions"] = force_dims
+            modifiers["force_dimensions"] = ["customEvent:donation_name"]
             modifiers["entity_field_hint"] = "customEvent:donation_name"
             scope_hint = modifiers.get("scope_hint", [])
             if "event" not in scope_hint:
@@ -1361,7 +2142,7 @@ class ModifierExtractor:
         if any(k in q for k in ["프로그램", "노블클럽", "천원의 힘", "donation_name"]):
             modifiers["needs_breakdown"] = True
             # 매출/구매 맥락일 때만 purchase 필터를 건다.
-            if any(k in q for k in ["매출", "수익", "구매", "purchase"]):
+            if (not modifiers.get("event_filters")) and any(k in q for k in ["매출", "수익", "구매", "purchase", "얼마나", "몇", "후원했", "규모"]):
                 modifiers["event_filter"] = "purchase"
             force_dims = modifiers.get("force_dimensions", [])
             for d in ["customEvent:donation_name"]:
@@ -1370,6 +2151,16 @@ class ModifierExtractor:
             modifiers["force_dimensions"] = force_dims
             modifiers["entity_field_hint"] = "customEvent:donation_name"
             modifiers["scope_hint"] = ["event"]
+
+        # 3.10b 후원 이름/후원명 질문은 donation_name 축 강제
+        if any(k in q for k in ["후원 이름", "후원이름", "후원명", "donation_name"]):
+            modifiers["needs_breakdown"] = True
+            modifiers["needs_total"] = False
+            modifiers["scope_hint"] = ["event"]
+            modifiers["force_dimensions"] = ["customEvent:donation_name"]
+            modifiers["entity_field_hint"] = "customEvent:donation_name"
+            if (not modifiers.get("event_filters")) and any(k in q for k in ["매출", "수익", "구매", "얼마나", "몇", "후원했"]):
+                modifiers["event_filter"] = "purchase"
 
         # 3.11 후원 유형 전환율(클릭->구매) 질문
         if any(k in q for k in ["후원 유형", "정기", "일시"]) and any(k in q for k in ["전환", "비율", "율"]) and any(k in q for k in ["클릭", "구매"]):
@@ -1388,7 +2179,7 @@ class ModifierExtractor:
             scope_hints.append("item")
         if any(k in q for k in ["사용자", "유저", "user"]):
             scope_hints.append("user")
-        if scope_hints:
+        if scope_hints and "scope_hint" not in modifiers:
             modifiers["scope_hint"] = scope_hints
 
         if modifiers.get("prefer_event_scope"):
@@ -1409,6 +2200,9 @@ class ModifierExtractor:
             modifiers["order_hint"] = "desc"
         elif any(k in q for k in ["낮은", "적은", "작은", "하위", "bottom"]):
             modifiers["order_hint"] = "asc"
+
+        # internal flag cleanup
+        modifiers.pop("suppress_purchase_param_rule", None)
         
         logging.info(f"[ModifierExtractor] Extracted: {modifiers}")
         return modifiers
@@ -1632,3 +2426,14 @@ class CandidateExtractor:
         logging.info(f"[CandidateExtractor] Modifiers: {modifiers}")
         
         return result
+        # 이벤트 종류/이벤트 목록 질의는 eventName 우선
+        if any(k in q for k in ["이벤트 종류", "이벤트 목록", "무슨 이벤트", "어떤 이벤트"]):
+            if not any(c.get("name") == "eventName" for c in candidates):
+                candidates.append({
+                    "name": "eventName",
+                    "score": 0.99,
+                    "matched_by": "event_category_list_rule",
+                    "scope": "event",
+                    "category": "event",
+                    "priority": GA4_DIMENSIONS.get("eventName", {}).get("priority", 0)
+                })

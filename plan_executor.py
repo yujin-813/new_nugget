@@ -206,6 +206,25 @@ class PlanExecutor:
                     )
                 )
             )
+        if filters and isinstance(filters.get("event_filters"), list):
+            event_vals = [str(v).strip() for v in filters.get("event_filters", []) if str(v).strip()]
+            if event_vals:
+                expressions = []
+                for ev in event_vals:
+                    expressions.append(
+                        FilterExpression(
+                            filter=Filter(
+                                field_name="eventName",
+                                string_filter=Filter.StringFilter(
+                                    value=ev,
+                                    match_type=Filter.StringFilter.MatchType.EXACT
+                                )
+                            )
+                        )
+                    )
+                filter_expressions.append(
+                    FilterExpression(or_group=FilterExpressionList(expressions=expressions))
+                )
         if filters and isinstance(filters.get("dimension_filters"), list):
             for f in filters["dimension_filters"]:
                 if not isinstance(f, dict):

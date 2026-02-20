@@ -2,6 +2,7 @@ import logging
 from datetime import timedelta
 from flask import Flask, request, jsonify, session, redirect, url_for, send_from_directory, Response
 from werkzeug.utils import secure_filename
+from werkzeug.middleware.proxy_fix import ProxyFix
 from oauthlib.oauth2 import WebApplicationClient
 import google.auth.transport.requests
 import google.oauth2.credentials
@@ -14,6 +15,7 @@ import pandas as pd
 import re
 from html import unescape
 from urllib.parse import unquote
+from urllib.parse import urlparse, urlunparse
 from dotenv import load_dotenv
 from typing import Any, Dict, List, Tuple
 from qa_module import handle_question, generate_unique_id
@@ -86,6 +88,269 @@ def sanitize(obj):
     if isinstance(obj, list):
         return [sanitize(v) for v in obj]
     return obj
+
+
+def _is_negative_feedback_text(text: str) -> bool:
+    q = (text or "").strip().lower()
+    if not q:
+        return False
+    # 분석 질문에서 자주 쓰는 "이상치"는 피드백이 아님
+    if "이상치" in q:
+        return False
+    # 추천 질문/탐색 질문 문장 패턴은 피드백 아님
+    if q.endswith("?") and any(k in q for k in ["해볼까요", "보여줘", "알려줘", "점검", "분석"]):
+        return False
+
+    feedback_tokens = [
+        "틀렸", "엉망", "잘못", "오답", "아닌데", "아니야",
+        "말이 안", "틀린", "다시 해", "맞지 않아",
+        "이상해", "이상하네", "이상하다"
+    ]
+    return any(t in q for t in feedback_tokens)
+
+
+def _is_feedback_only_text(text: str) -> bool:
+    q = (text or "").strip().lower()
+    if not q:
+        return False
+    if not _is_negative_feedback_text(q):
+        return False
+    analytics_tokens = [
+        "매출", "수익", "사용자", "세션", "전환", "이벤트", "클릭", "구매",
+        "채널", "소스", "매체", "국가", "기간", "지난주", "지난달", "비교", "추이", "비율"
+    ]
+    return (len(q) <= 20) and (not any(t in q for t in analytics_tokens))
+
+
+def _is_valid_http_url(url: str) -> bool:
+    try:
+        p = urlparse(str(url or "").strip())
+        return p.scheme in {"http", "https"} and bool(p.netloc)
+    except Exception:
+        return False
+
+
+def _tokenize_text(text: str) -> List[str]:
+    if not text:
+        return []
+    return [t.lower() for t in re.findall(r"[A-Za-z0-9가-힣_]+", str(text)) if len(t) >= 2]
+
+
+def _jaccard(a: List[str], b: List[str]) -> float:
+    sa, sb = set(a or []), set(b or [])
+    if not sa or not sb:
+        return 0.0
+    return len(sa & sb) / max(1, len(sa | sb))
+
+
+def _intent_signature(text: str) -> Dict[str, bool]:
+    t = (text or "").lower()
+    return {
+        "revenue": any(k in t for k in ["매출", "수익", "revenue", "amount"]),
+        "user": any(k in t for k in ["사용자", "유저", "구매자", "후원자", "user", "purchaser"]),
+        "event": any(k in t for k in ["이벤트", "클릭", "event", "click"]),
+        "channel": any(k in t for k in ["채널", "소스", "매체", "경로", "유입", "source", "medium"]),
+        "trend": any(k in t for k in ["추이", "트렌드", "흐름", "일별", "월별", "week", "month", "trend"]),
+    }
+
+
+def _build_reask_suggestions(question: str) -> List[str]:
+    sig = _intent_signature(question)
+    if sig["revenue"] and sig["channel"]:
+        return ["구매 수익을 채널별로 볼까요?", "소스/매체 기준으로 볼까요?", "기간을 지난주로 고정할까요?"]
+    if sig["revenue"]:
+        return ["총 매출로 볼까요?", "상품별 매출 TOP 10으로 볼까요?", "후원 유형별 매출로 볼까요?"]
+    if sig["event"]:
+        return ["eventName 기준으로 볼까요?", "donation_click 이벤트만 볼까요?", "이벤트를 기간 비교로 볼까요?"]
+    if sig["user"]:
+        return ["활성 사용자로 볼까요?", "전체 구매자 수로 볼까요?", "채널별 사용자로 볼까요?"]
+    return ["지표명을 포함해 다시 질문해 주세요.", "기간을 함께 지정해볼까요?", "차원(예: 채널/상품)도 함께 지정해볼까요?"]
+
+
+def _extract_message_from_response(resp: Any) -> str:
+    try:
+        if not isinstance(resp, dict):
+            return ""
+        body = resp.get("response") if isinstance(resp.get("response"), dict) else resp
+        return str(body.get("message", "")) if isinstance(body, dict) else ""
+    except Exception:
+        return ""
+
+
+def _is_no_data_or_no_match_response(resp: Any) -> bool:
+    msg = _extract_message_from_response(resp)
+    if not msg:
+        return False
+    bad_patterns = [
+        "매칭 가능한 지표를 찾지 못",
+        "조건에 맞는 항목을 찾지 못",
+        "질문 의도는 이해했지만",
+        "0개 블록 분석 완료",
+        "데이터를 찾을 수 없",
+    ]
+    return any(p in msg for p in bad_patterns)
+
+
+def _is_ga_no_match_response(resp: Any) -> bool:
+    if not isinstance(resp, dict):
+        return False
+    route = str(resp.get("route") or "").lower()
+    if route not in {"ga4", "ga4_followup"}:
+        return False
+    return _is_no_data_or_no_match_response(resp)
+
+
+def _rewrite_ga_question_for_retry(question: str) -> str:
+    q = str(question or "").strip()
+    lq = q.lower()
+    period = ""
+    if "지난주" in lq:
+        period = "지난주 "
+    elif "지난달" in lq:
+        period = "지난달 "
+    elif "이번달" in lq or "이번 달" in lq:
+        period = "이번달 "
+    elif "이번주" in lq or "이번 주" in lq:
+        period = "이번주 "
+
+    if "사용자" in lq and any(k in lq for k in ["추이", "트렌드", "흐름"]):
+        return f"{period}활성 사용자 추이 알려줘".strip()
+    if "사용자" in lq:
+        return f"{period}활성 사용자 수 알려줘".strip()
+    if any(k in lq for k in ["매출", "수익"]):
+        return f"{period}구매 수익 알려줘".strip()
+    if "세션" in lq:
+        return f"{period}세션 수 알려줘".strip()
+    if "이벤트" in lq and "클릭" in lq:
+        return f"{period}이벤트 클릭 수 알려줘".strip()
+    return q
+
+
+def _rewrite_followup_with_context(followup: str, last_user_question: str) -> str:
+    f = str(followup or "").strip()
+    last_q = str(last_user_question or "").strip()
+    if not f:
+        return f
+    if not last_q:
+        return f
+
+    if "채널별" in f:
+        return f"{last_q}를 채널별로 나눠서 보여줘"
+    if "디바이스별" in f:
+        return f"{last_q}를 디바이스별로 나눠서 보여줘"
+    if "랜딩페이지" in f:
+        return f"{last_q}를 랜딩페이지별로 보여줘"
+    if "이전 기간과 비교" in f or "증감" in f:
+        return f"{last_q}를 이전 기간과 비교해 증감까지 보여줘"
+    if "TOP 10" in f or "top 10" in f.lower():
+        return f"{last_q}를 TOP 10으로 확장해줘"
+    if "원인 분석" in f:
+        return f"{last_q}의 원인 분석을 해줘"
+    return f
+
+
+def _normalize_followups(route: str, body: Dict[str, Any], current_question: str, last_user_question: str) -> List[str]:
+    raw = body.get("followup_suggestions")
+    candidates = [str(x).strip() for x in raw] if isinstance(raw, list) else []
+
+    # 실패/불일치 응답에서는 안전한 재질문 세트로 교체
+    if _is_no_data_or_no_match_response({"response": body, "route": route}):
+        return _build_reask_suggestions(last_user_question or current_question)
+
+    # 추천이 비어 있으면 현재 질문 기반 기본 추천 제공
+    if not candidates:
+        return _build_reask_suggestions(current_question)
+
+    out = []
+    seen = set()
+    for f in candidates:
+        if not f:
+            continue
+        # 숫자 선택형 같은 애매 문구 제거
+        if re.match(r"^\s*\d+\s*번?\s*$", f):
+            continue
+        rewritten = _rewrite_followup_with_context(f, last_user_question or current_question)
+        s = re.sub(r"\s+", " ", rewritten).strip()
+        if not s:
+            continue
+        if s not in seen:
+            seen.add(s)
+            out.append(s)
+
+    # 전부 제거되면 안전 기본값
+    if not out:
+        out = _build_reask_suggestions(current_question)
+    return out[:5]
+
+
+def _extract_response_body(resp: Any) -> Dict[str, Any]:
+    if not isinstance(resp, dict):
+        return {}
+    if isinstance(resp.get("response"), dict):
+        return resp["response"]
+    return resp
+
+
+def _apply_bad_regression_guard(user_id: str, question: str, response: Any) -> Any:
+    """
+    Guardrail for repeated bad-labeled patterns:
+    if intent mismatch is detected and the question is similar to previous bad-labeled questions,
+    return a safe clarify-style response instead of likely wrong answer.
+    """
+    if not isinstance(response, dict):
+        return response
+
+    body = _extract_response_body(response)
+    message = str(body.get("message", ""))
+    if not message:
+        return response
+
+    qsig = _intent_signature(question)
+    rsig = _intent_signature(message)
+
+    mismatch = False
+    if qsig["revenue"] and (rsig["user"] and not rsig["revenue"]):
+        mismatch = True
+    if qsig["event"] and (not rsig["event"] and rsig["revenue"]):
+        mismatch = True
+    if qsig["channel"] and (not rsig["channel"] and not rsig["event"]):
+        mismatch = True
+    if qsig["trend"] and ("기준 기간은" in message and "추이" not in message):
+        mismatch = True
+
+    if not mismatch:
+        return response
+
+    bad_questions = DBManager.get_recent_bad_questions(user_id=user_id, limit=200)
+    q_tokens = _tokenize_text(question)
+    max_sim = 0.0
+    for bq in bad_questions:
+        sim = _jaccard(q_tokens, _tokenize_text(bq))
+        if sim > max_sim:
+            max_sim = sim
+
+    # bad history가 충분하거나, 유사 bad 질문이 있으면 방어 발동
+    if len(bad_questions) < 5 and max_sim < 0.25:
+        return response
+
+    safe_msg = (
+        "질문 의도(지표/차원)와 현재 응답 후보가 어긋날 가능성이 있어 다시 확인이 필요합니다.\n"
+        "원하시는 기준을 한 번만 더 지정해 주세요. 예: `매출 + 채널별`, `donation_click + donation_name`, `지난주 + 사용자 추이`"
+    )
+    body["message"] = safe_msg
+    body["status"] = "clarify"
+    body["plot_data"] = []
+    body["followup_suggestions"] = _build_reask_suggestions(question)
+    body["guardrail"] = {
+        "type": "bad_regression_guard",
+        "max_bad_similarity": round(float(max_sim), 3),
+        "bad_pool_size": len(bad_questions)
+    }
+    if isinstance(response.get("response"), dict):
+        response["response"] = body
+    else:
+        response = body
+    return response
 
 
 def _html_to_notion_markdown(title: str, html_content: str) -> str:
@@ -790,7 +1055,57 @@ def _build_notion_export_payload(title: str, html_content: str) -> Dict[str, Any
         "markdown": markdown
     }
 
+
+def _build_jandi_export_payload(title: str, html_content: str) -> Dict[str, Any]:
+    """
+    JANDI 공유용 요약 payload 생성.
+    - 짧은 실행 요약만 제공 (노션 형식 리포트와 명확히 분리)
+    """
+    notion_payload = _build_notion_export_payload(title, html_content)
+    pre = notion_payload.get("preprocessed", {}) or {}
+    planner = notion_payload.get("planner", {}) or {}
+    report_obj = notion_payload.get("report_object", {}) or {}
+
+    executive = [str(x) for x in (report_obj.get("executive_summary") or [])[:3]]
+    actions = report_obj.get("actions") or []
+    risks = report_obj.get("risks") or []
+    basis = planner.get("comparison_basis", pre.get("comparison_basis", "평균 대비"))
+
+    lines = [f"[요약] {title}"]
+    if basis:
+        lines.append(f"- 비교 기준: {basis}")
+    for s in executive:
+        lines.append(f"- {s}")
+    if actions:
+        top_action = actions[0]
+        lines.append(f"- 액션: {top_action.get('action', '')} ({top_action.get('priority', '')})")
+    if risks:
+        top_risk = risks[0]
+        lines.append(f"- 리스크: {top_risk.get('risk', '')} [{str(top_risk.get('level', '')).upper()}]")
+
+    connect_info = []
+    for i, s in enumerate(executive[:2], 1):
+        connect_info.append({"title": f"핵심 요약 {i}", "description": s})
+    for i, a in enumerate(actions[:1], 1):
+        connect_info.append({
+            "title": f"실행 {i}",
+            "description": f"{a.get('action', '')} | {a.get('owner_suggestion', '')} | D+{a.get('deadline_days', '')}"
+        })
+
+    return {
+        "title": title,
+        "summary_text": "\n".join(lines),
+        "jandi_payload": {
+            "body": "\n".join(lines),
+            "connectColor": "#0F9D58",
+            "connectInfo": connect_info[:3]
+        },
+        # 노션 상세 payload는 별도 엔드포인트(/export_report/notion)에서만 사용
+        "notion_payload": {}
+    }
+
 app = Flask(__name__)
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 flask_env = os.getenv("FLASK_ENV", "development").lower()
 secret_key = os.getenv("FLASK_SECRET_KEY", "").strip()
 if flask_env == "production" and not secret_key:
@@ -837,6 +1152,10 @@ def upload_file():
     filepath = os.path.join(UPLOAD_FOLDER, filename)
     file.save(filepath)
     session['uploaded_file_path'] = filepath  # 세션에 저장
+    selected = session.get('selected_datasets') or []
+    if filename not in selected:
+        selected.append(filename)
+        session['selected_datasets'] = selected
 
     return jsonify({"message": "File uploaded successfully", "file_path": filepath})
 
@@ -851,6 +1170,32 @@ GOOGLE_CLIENT_SECRET = google_creds["client_secret"]
 GOOGLE_DISCOVERY_URL = "https://accounts.google.com/.well-known/openid-configuration"
 
 client = WebApplicationClient(GOOGLE_CLIENT_ID)
+
+
+def _oauth_redirect_uri() -> str:
+    """
+    OAuth redirect URI resolver.
+    Priority:
+      1) OAUTH_REDIRECT_URI (explicit full URI)
+      2) url_for('callback', _external=True)
+    """
+    explicit = os.getenv("OAUTH_REDIRECT_URI", "").strip()
+    if explicit:
+        # allow host-only value and normalize to callback endpoint
+        try:
+            p = urlparse(explicit)
+            if p.scheme and p.netloc:
+                path = p.path or ""
+                if path in {"", "/"}:
+                    p = p._replace(path="/oauth2callback")
+                    return urlunparse(p)
+        except Exception:
+            pass
+        if explicit.endswith("/"):
+            return explicit.rstrip("/") + "/oauth2callback"
+        return explicit
+    return url_for('callback', _external=True)
+
 
 def get_google_provider_cfg():
     return requests.get(GOOGLE_DISCOVERY_URL).json()
@@ -876,10 +1221,11 @@ def index():
 def login():
     google_provider_cfg = get_google_provider_cfg()
     authorization_endpoint = google_provider_cfg["authorization_endpoint"]
+    redirect_uri = _oauth_redirect_uri()
 
     request_uri = client.prepare_request_uri(
         authorization_endpoint,
-        redirect_uri=url_for('callback', _external=True),
+        redirect_uri=redirect_uri,
         scope=["openid", "email", "profile", "https://www.googleapis.com/auth/analytics.readonly"],
     )
     app.logger.info(f"Redirecting to: {request_uri}")
@@ -890,11 +1236,12 @@ def callback():
     code = request.args.get("code")
     google_provider_cfg = get_google_provider_cfg()
     token_endpoint = google_provider_cfg["token_endpoint"]
+    redirect_uri = _oauth_redirect_uri()
 
     token_url, headers, body = client.prepare_token_request(
         token_endpoint,
         authorization_response=request.url,
-        redirect_url=url_for('callback', _external=True),
+        redirect_url=redirect_uri,
         code=code
     )
     app.logger.info(f"Token URL: {token_url}")
@@ -1422,6 +1769,10 @@ def get_preprocessed_data():
         # ✅ 세션에 파일 경로 저장
         old_path = session.get('preprocessed_data_path')
         session['preprocessed_data_path'] = dataset_path
+        selected = session.get('selected_datasets') or []
+        if dataset_name not in selected:
+            selected.append(dataset_name)
+            session['selected_datasets'] = selected
         session["active_source"] = "file"
         
         if old_path != dataset_path:
@@ -1446,18 +1797,32 @@ def ask_question():
     try:
         data = request.get_json()
         question = (data.get('question') or "").strip()
+        beginner_mode = bool(data.get("beginner_mode", False))
+        session["beginner_mode"] = beginner_mode
 
         if not question:
             return jsonify({"error": "Question is required"}), 400
 
         # 추천 질문 번호 선택 지원 (예: "1번", "2")
-        m = re.match(r"^\s*(\d+)\s*번?\s*$", question)
-        if m:
-            idx = int(m.group(1)) - 1
-            suggestions = session.get("last_followup_suggestions") or []
-            if 0 <= idx < len(suggestions):
-                question = suggestions[idx]
-                logging.info(f"[Ask] Followup option selected: {m.group(1)} -> {question}")
+        is_followup_selected = False
+        selected_followup_text = None
+        # 단, 소스 선택/파일 전환 확인 대기 중에는 번호를 followup으로 치환하지 않는다.
+        has_pending_choice = bool(session.get("pending_source_choice") or session.get("pending_file_switch") or session.get("pending_clarify"))
+        if not has_pending_choice:
+            m = re.match(r"^\s*(\d+)\s*번?\s*$", question)
+            if m:
+                idx = int(m.group(1)) - 1
+                suggestions = session.get("last_followup_suggestions") or []
+                if 0 <= idx < len(suggestions):
+                    question = suggestions[idx]
+                    is_followup_selected = True
+                    selected_followup_text = question
+                    logging.info(f"[Ask] Followup option selected: {m.group(1)} -> {question}")
+            else:
+                suggestions = session.get("last_followup_suggestions") or []
+                if question in suggestions:
+                    is_followup_selected = True
+                    selected_followup_text = question
 
         property_id = session.get("property_id")
         # 🔥 파일 경로 세션 연동 (전처리 우선)
@@ -1471,6 +1836,31 @@ def ask_question():
             session['conversation_id'] = str(uuid.uuid4())
             conversation_id = session['conversation_id']
 
+        # 사용자 부정 피드백(틀림/이상) 자동 수집
+        if _is_negative_feedback_text(question):
+            prev_question = session.get("last_user_question")
+            prev_response = session.get("last_response")
+            DBManager.mark_last_interaction_bad(
+                conversation_id=conversation_id,
+                note=f"auto_feedback: {question}"
+            )
+            DBManager.log_failure_feedback(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                feedback_text=question,
+                target_question=prev_question,
+                target_response=prev_response
+            )
+            # 피드백만 입력된 경우는 저장 확인 후 종료
+            if _is_feedback_only_text(question):
+                return jsonify({
+                    "response": {
+                        "message": "피드백을 저장했습니다. 어떤 질문에서 틀렸는지 이어서 알려주시면 바로 보정하겠습니다.",
+                        "plot_data": []
+                    },
+                    "route": "system"
+                })
+
         # 🔥 handle_question에 user_id와 conversation_id 추가 전달
         logging.info(f"[Ask] Question: {question}, Prop: {property_id}, File: {file_path}")
         
@@ -1480,11 +1870,67 @@ def ask_question():
             file_path=file_path,
             user_id=user_id,
             conversation_id=conversation_id,
-            semantic=semantic
+            semantic=semantic,
+            beginner_mode=bool(session.get("beginner_mode", False))
         )
+
+        # 추천 질문 클릭 시 "매칭 실패"면 컨텍스트를 붙여 1회 자동 재시도
+        if is_followup_selected and _is_no_data_or_no_match_response(response):
+            prev_question = session.get("last_user_question") or ""
+            rewritten = _rewrite_followup_with_context(selected_followup_text or question, prev_question)
+            if rewritten and rewritten != question:
+                logging.info(f"[Ask] Followup retry with context rewrite: {question} -> {rewritten}")
+                response2 = handle_question(
+                    rewritten,
+                    property_id=property_id,
+                    file_path=file_path,
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    semantic=semantic,
+                    beginner_mode=bool(session.get("beginner_mode", False))
+                )
+                # 재시도 결과가 더 낫다면 교체
+                if not _is_no_data_or_no_match_response(response2):
+                    response = response2
+
+        # GA 질문에서 미스매치/무응답일 때 표준 표현으로 1회 자동 재시도
+        if _is_ga_no_match_response(response):
+            ga_retry_q = _rewrite_ga_question_for_retry(question)
+            if ga_retry_q and ga_retry_q != question:
+                logging.info(f"[Ask] GA retry with normalized question: {question} -> {ga_retry_q}")
+                response2 = handle_question(
+                    ga_retry_q,
+                    property_id=property_id,
+                    file_path=file_path,
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    semantic=semantic,
+                    beginner_mode=bool(session.get("beginner_mode", False))
+                )
+                if not _is_ga_no_match_response(response2):
+                    response = response2
+
+        response = _apply_bad_regression_guard(user_id=user_id, question=question, response=response)
 
         
         logging.info(f"[Ask] Response Keys: {response.keys() if isinstance(response, dict) else 'Not Dict'}")
+
+        # 후속 질문 추천을 현재 상태에서 실행 가능한 문장으로 정제
+        if isinstance(response, dict):
+            r = response.get("route")
+            b = response.get("response") if isinstance(response.get("response"), dict) else response
+            if isinstance(b, dict):
+                last_q_for_followup = session.get("last_user_question") or question
+                b["followup_suggestions"] = _normalize_followups(
+                    route=str(r or ""),
+                    body=b,
+                    current_question=question,
+                    last_user_question=last_q_for_followup
+                )
+                if isinstance(response.get("response"), dict):
+                    response["response"] = b
+                else:
+                    response = b
 
         # [P0] Session Save
         session['last_response'] = response
@@ -1503,13 +1949,14 @@ def ask_question():
         session["last_followup_suggestions"] = followups
 
         # 학습/평가용 인터랙션 로그 저장
+        interaction_id = None
         if isinstance(body, dict):
             plot_data = body.get("plot_data")
             has_plot = isinstance(plot_data, dict) and bool(plot_data.get("labels")) and bool(plot_data.get("series"))
             has_raw_data = isinstance(body.get("raw_data"), list) and len(body.get("raw_data")) > 0
             msg = str(body.get("message", ""))
             abstained = any(k in msg for k in ["없습니다", "모릅니다", "알 수 없습니다", "확인할 수 없습니다"])
-            DBManager.log_interaction(
+            interaction_id = DBManager.log_interaction(
                 user_id=user_id,
                 conversation_id=conversation_id,
                 route=route or "unknown",
@@ -1520,8 +1967,34 @@ def ask_question():
                 abstained=abstained
             )
 
+        # 다음 피드백 연결을 위해 직전 질의/응답 저장
+        session["last_user_question"] = question
+        session["last_response"] = response
+
         # [P0] Sanitize Response (NaN -> None)
         sanitized_response = sanitize(response)
+        # 응답에 데이터 소스 라벨 보강 (복수 연결 시에도 어떤 소스를 썼는지 표시)
+        try:
+            if isinstance(sanitized_response, dict) and isinstance(sanitized_response.get("response"), dict):
+                body = sanitized_response["response"]
+                r = str(sanitized_response.get("route") or "").lower()
+                if not body.get("data_label"):
+                    if r == "file":
+                        fp = file_path or session.get("preprocessed_data_path") or session.get("uploaded_file_path")
+                        body["data_label"] = f"FILE · {os.path.basename(fp)}" if fp else "FILE"
+                    elif r in {"ga4", "ga4_followup"}:
+                        prop_name = session.get("property_name") or (property_id or session.get("property_id") or "")
+                        body["data_label"] = f"GA4 · {prop_name}" if prop_name else "GA4"
+                    elif r == "mixed":
+                        fp = file_path or session.get("preprocessed_data_path") or session.get("uploaded_file_path")
+                        fn = os.path.basename(fp) if fp else "-"
+                        prop_name = session.get("property_name") or (property_id or session.get("property_id") or "-")
+                        body["data_label"] = f"MIXED · GA4:{prop_name} + FILE:{fn}"
+                sanitized_response["response"] = body
+        except Exception:
+            pass
+        if isinstance(sanitized_response, dict):
+            sanitized_response["interaction_id"] = interaction_id
         return jsonify(sanitized_response)
 
     except Exception as e:
@@ -1619,6 +2092,179 @@ def export_report_notion():
         })
     except Exception as e:
         logging.error(f"Error exporting notion report: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/export_report/notion_webhook', methods=['POST'])
+def export_report_notion_webhook():
+    """
+    Send notion-ready payload to user webhook.
+    Input:
+      - report_id (optional)
+      - title/content (optional)
+      - webhook_url (required, unless saved preset lookup is used in UI)
+      - send (optional, default true)
+    """
+    try:
+        data = request.get_json() or {}
+        report_id = data.get("report_id")
+        title = data.get("title", "Untitled Report")
+        content = data.get("content", "")
+        webhook_url = str(data.get("webhook_url") or "").strip()
+        send_flag = bool(data.get("send", True))
+
+        if report_id:
+            report = DBManager.get_report_by_id(int(report_id))
+            if not report:
+                return jsonify({"error": "Report not found"}), 404
+            title = report.get("title", title)
+            content = report.get("content", content)
+
+        if not content:
+            return jsonify({"error": "Report content is required"}), 400
+        if not isinstance(content, str):
+            content = json.dumps(content, ensure_ascii=False)
+
+        notion_payload = _build_notion_export_payload(title, content)
+        body = {
+            "title": title,
+            "markdown": notion_payload.get("markdown", ""),
+            "report_object": notion_payload.get("report_object", {}),
+            "planner": notion_payload.get("planner", {}),
+            "preprocessed": notion_payload.get("preprocessed", {}),
+            "validation_errors": notion_payload.get("validation_errors", []),
+            "format": "notion_markdown"
+        }
+
+        delivered = False
+        delivery_error = None
+        if send_flag:
+            if not webhook_url or not _is_valid_http_url(webhook_url):
+                return jsonify({
+                    "success": False,
+                    "error": "Valid webhook_url is required",
+                    "payload": body
+                }), 400
+            resp = requests.post(webhook_url, json=body, timeout=12)
+            delivered = 200 <= resp.status_code < 300
+            if not delivered:
+                delivery_error = f"Notion webhook failed: {resp.status_code} {resp.text[:300]}"
+
+        return jsonify({
+            "success": delivery_error is None,
+            "format": "notion_webhook",
+            "title": title,
+            "payload": body,
+            "delivered": delivered,
+            "delivery_error": delivery_error
+        }), (200 if delivery_error is None else 502)
+    except Exception as e:
+        logging.error(f"Error exporting notion webhook: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/export_report/jandi', methods=['POST'])
+def export_report_jandi():
+    """
+    JANDI 공유용 요약 생성/전송.
+    Input:
+      - report_id (optional)
+      - title/content (optional)
+      - webhook_url (optional, 없으면 JANDI_WEBHOOK_URL env 사용)
+      - send (optional, default true)
+    """
+    try:
+        data = request.get_json() or {}
+        report_id = data.get("report_id")
+        title = data.get("title", "Untitled Report")
+        content = data.get("content", "")
+        webhook_url = (data.get("webhook_url") or os.getenv("JANDI_WEBHOOK_URL", "")).strip()
+        send_flag = bool(data.get("send", True))
+
+        if report_id:
+            report = DBManager.get_report_by_id(int(report_id))
+            if not report:
+                return jsonify({"error": "Report not found"}), 404
+            title = report.get("title", title)
+            content = report.get("content", content)
+
+        if not content:
+            return jsonify({"error": "Report content is required"}), 400
+        if not isinstance(content, str):
+            content = json.dumps(content, ensure_ascii=False)
+
+        payload = _build_jandi_export_payload(title, content)
+        jandi_body = payload.get("jandi_payload", {})
+        delivered = False
+        delivery_error = None
+
+        if send_flag:
+            if not webhook_url:
+                return jsonify({
+                    "success": False,
+                    "error": "JANDI webhook URL is required",
+                    "summary_text": payload.get("summary_text", ""),
+                    "jandi_payload": jandi_body
+                }), 400
+
+            resp = requests.post(webhook_url, json=jandi_body, timeout=12)
+            delivered = 200 <= resp.status_code < 300
+            if not delivered:
+                delivery_error = f"JANDI webhook failed: {resp.status_code} {resp.text[:300]}"
+
+        return jsonify({
+            "success": delivery_error is None,
+            "format": "jandi",
+            "title": title,
+            "summary_text": payload.get("summary_text", ""),
+            "jandi_payload": jandi_body,
+            "delivered": delivered,
+            "delivery_error": delivery_error
+        }), (200 if delivery_error is None else 502)
+    except Exception as e:
+        logging.error(f"Error exporting jandi report: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/webhook_presets', methods=['GET', 'POST'])
+def webhook_presets():
+    user_id = session.get("user_id", "anonymous")
+    try:
+        if request.method == 'GET':
+            channel = request.args.get("channel", default=None, type=str)
+            presets = DBManager.list_webhook_presets(user_id=user_id, channel=channel)
+            return jsonify({"success": True, "presets": presets})
+
+        body = request.get_json(silent=True) or {}
+        channel = str(body.get("channel") or "").strip().lower()
+        name = str(body.get("name") or "").strip()
+        url = str(body.get("url") or "").strip()
+        if channel not in {"notion", "jandi"}:
+            return jsonify({"error": "channel must be notion or jandi"}), 400
+        if not name:
+            return jsonify({"error": "name is required"}), 400
+        if not _is_valid_http_url(url):
+            return jsonify({"error": "valid url is required"}), 400
+        ok = DBManager.save_webhook_preset(user_id=user_id, channel=channel, name=name, url=url)
+        if not ok:
+            return jsonify({"error": "failed to save preset"}), 500
+        presets = DBManager.list_webhook_presets(user_id=user_id, channel=channel)
+        return jsonify({"success": True, "presets": presets})
+    except Exception as e:
+        logging.error(f"Error handling webhook presets: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/webhook_presets/<int:preset_id>', methods=['DELETE'])
+def delete_webhook_preset(preset_id):
+    user_id = session.get("user_id", "anonymous")
+    try:
+        ok = DBManager.delete_webhook_preset(user_id=user_id, preset_id=preset_id)
+        if not ok:
+            return jsonify({"error": "preset not found"}), 404
+        return jsonify({"success": True, "deleted_id": int(preset_id)})
+    except Exception as e:
+        logging.error(f"Error deleting webhook preset: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
 
@@ -1725,6 +2371,25 @@ def admin_label_status():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route('/admin/regression_snapshot', methods=['GET'])
+def admin_regression_snapshot():
+    if not _require_admin_token():
+        return jsonify({"error": "unauthorized"}), 401
+    try:
+        days = request.args.get("days", default=14, type=int)
+        limit = request.args.get("limit", default=100, type=int)
+        user_id = request.args.get("user_id", default=None, type=str)
+        snap = DBManager.get_regression_snapshot(
+            user_id=user_id,
+            days=max(1, min(days, 3650)),
+            limit=max(10, min(limit, 5000))
+        )
+        return jsonify({"success": True, "snapshot": snap})
+    except Exception as e:
+        logging.error(f"Error getting regression snapshot: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route('/admin/label_interaction', methods=['POST'])
 def admin_label_interaction():
     if not _require_admin_token():
@@ -1742,6 +2407,25 @@ def admin_label_interaction():
         return jsonify({"success": True, "interaction_id": int(interaction_id), "label": str(label).lower()})
     except Exception as e:
         logging.error(f"Error labeling interaction: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/label_interaction', methods=['POST'])
+def label_interaction():
+    """User-facing interaction label API (good/bad/unknown/unlabeled)."""
+    try:
+        body = request.get_json() or {}
+        interaction_id = body.get("interaction_id")
+        label = body.get("label")
+        note = body.get("note")
+        if not interaction_id or not label:
+            return jsonify({"error": "interaction_id and label are required"}), 400
+        ok = DBManager.set_interaction_label(interaction_id=interaction_id, label=label, note=note)
+        if not ok:
+            return jsonify({"error": "failed to set label"}), 400
+        return jsonify({"success": True, "interaction_id": int(interaction_id), "label": str(label).lower()})
+    except Exception as e:
+        logging.error(f"Error labeling interaction(user): {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
 

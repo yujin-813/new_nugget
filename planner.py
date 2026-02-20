@@ -156,7 +156,7 @@ class GA4Planner:
         # TopN/Breakdown follow-up에서 후보가 비어 있으면 이전 state를 재사용한다.
         metric_candidates = metric_candidates or []
         dimension_candidates = dimension_candidates or []
-        if intent in ["topn", "breakdown"] and last_state:
+        if intent in ["topn", "breakdown", "comparison"] and last_state:
             # dimension이 명시된 새 질문(예: 채널별/디바이스별)이면
             # 이전 metric을 무조건 재사용하지 않는다.
             if not metric_candidates and not dimension_candidates and last_state.get("metrics"):
@@ -194,34 +194,39 @@ class GA4Planner:
                     modifiers["scope_hint"] = [inferred_scope]
         # metric_single라도 breakdown 힌트가 있으면 이전 metric을 재사용
         if intent == "metric_single" and modifiers.get("needs_breakdown") and last_state and not metric_candidates:
-            if last_state.get("metrics"):
-                metric_candidates = []
-                for m in last_state.get("metrics", []):
-                    m_name = m.get("name")
-                    if not m_name:
-                        continue
-                    metric_candidates.append({
-                        "name": m_name,
-                        "score": 0.80,
-                        "matched_by": "last_state",
-                        "scope": self._metric_scope(m_name),
-                        "priority": GA4_METRICS.get(m_name, {}).get("priority", 0),
-                    })
+            metric_candidates = self._build_breakdown_metric_candidates(
+                last_state=last_state,
+                modifiers=modifiers,
+                dimension_candidates=dimension_candidates,
+                reuse_score=0.80,
+                reuse_tag="last_state",
+                fallback_score=0.78,
+                fallback_tag="scope_default_metric",
+            )
         # breakdown/topn에서도 metric 후보가 비어 있으면 이전 metric 재사용
         if intent in ["breakdown", "topn"] and modifiers.get("needs_breakdown") and last_state and not metric_candidates:
-            if last_state.get("metrics"):
-                metric_candidates = []
-                for m in last_state.get("metrics", []):
-                    m_name = m.get("name")
-                    if not m_name:
-                        continue
-                    metric_candidates.append({
-                        "name": m_name,
-                        "score": 0.86,
-                        "matched_by": "last_state_breakdown_metric",
-                        "scope": self._metric_scope(m_name),
-                        "priority": GA4_METRICS.get(m_name, {}).get("priority", 0),
-                    })
+            metric_candidates = self._build_breakdown_metric_candidates(
+                last_state=last_state,
+                modifiers=modifiers,
+                dimension_candidates=dimension_candidates,
+                reuse_score=0.86,
+                reuse_tag="last_state_breakdown_metric",
+                fallback_score=0.82,
+                fallback_tag="scope_default_metric",
+            )
+        # comparison follow-up에서 metric 후보가 비어 있으면 이전 metric 재사용
+        if intent in ["comparison", "metric_multi"] and last_state and not metric_candidates:
+            for m in last_state.get("metrics", []) or []:
+                m_name = m.get("name")
+                if not m_name:
+                    continue
+                metric_candidates.append({
+                    "name": m_name,
+                    "score": 0.84,
+                    "matched_by": "last_state_compare_metric",
+                    "scope": self._metric_scope(m_name),
+                    "priority": GA4_METRICS.get(m_name, {}).get("priority", 0),
+                })
         
         # 2. Metrics 확정
         final_metrics = self._select_metrics(metric_candidates, intent, modifiers)
@@ -250,6 +255,64 @@ class GA4Planner:
             logging.info(f"  - {b.block_id} ({b.scope}): {len(b.metrics)} metrics, {len(b.dimensions)} dims")
         
         return plan
+
+    def _build_breakdown_metric_candidates(
+        self,
+        last_state: Optional[Dict],
+        modifiers: Dict,
+        dimension_candidates: List[Dict],
+        reuse_score: float,
+        reuse_tag: str,
+        fallback_score: float,
+        fallback_tag: str,
+    ) -> List[Dict]:
+        """
+        Breakdown follow-up metric 후보 보강.
+        - 새 차원 스코프가 명확하면 해당 스코프 metric만 재사용
+        - 재사용 불가 시 스코프 기본 metric으로 안전 fallback
+        """
+        candidates: List[Dict] = []
+        target_scope = None
+        scope_hints = (modifiers or {}).get("scope_hint") or []
+        if scope_hints:
+            target_scope = scope_hints[0]
+        elif dimension_candidates:
+            target_scope = (dimension_candidates[0] or {}).get("scope")
+
+        for m in (last_state or {}).get("metrics", []) or []:
+            m_name = m.get("name")
+            if not m_name:
+                continue
+            m_scope = self._metric_scope(m_name)
+            if target_scope and m_scope != target_scope:
+                continue
+            candidates.append({
+                "name": m_name,
+                "score": reuse_score,
+                "matched_by": reuse_tag,
+                "scope": m_scope,
+                "priority": GA4_METRICS.get(m_name, {}).get("priority", 0),
+            })
+
+        if candidates:
+            return candidates
+
+        if target_scope:
+            default_by_scope = {
+                "event": "eventCount",
+                "item": "itemRevenue",
+                "user": "activeUsers",
+            }
+            default_metric = default_by_scope.get(target_scope)
+            if default_metric and default_metric in GA4_METRICS:
+                candidates.append({
+                    "name": default_metric,
+                    "score": fallback_score,
+                    "matched_by": fallback_tag,
+                    "scope": self._metric_scope(default_metric),
+                    "priority": GA4_METRICS.get(default_metric, {}).get("priority", 0),
+                })
+        return candidates
     
     # -------------------------------------------------------------------------
     # Date Resolution
@@ -291,9 +354,20 @@ class GA4Planner:
         - intent가 multi면 여러 개 허용
         """
         if not candidates:
+            forced_metrics = (modifiers or {}).get("force_metrics") if modifiers else None
+            if isinstance(forced_metrics, list):
+                valid_forced = [m for m in forced_metrics if m in GA4_METRICS]
+                if valid_forced:
+                    return [{"name": m} for m in valid_forced]
             return [{"name": DEFAULT_METRIC}]
         if not modifiers:
             modifiers = {}
+
+        forced_metrics = modifiers.get("force_metrics") if modifiers else None
+        if isinstance(forced_metrics, list):
+            valid_forced = [m for m in forced_metrics if m in GA4_METRICS]
+            if valid_forced:
+                return [{"name": m} for m in valid_forced]
         
         # score 기준 정렬
         sorted_candidates = sorted(candidates, key=lambda x: x.get("score", 0), reverse=True)
@@ -408,7 +482,14 @@ class GA4Planner:
             if time_dims:
                 return [{"name": time_dims[0]["name"]}]
             return [{"name": DEFAULT_TIME_DIMENSION}] if DEFAULT_TIME_DIMENSION else []
-        
+
+        # Comparison: 가능한 경우 time dimension 우선 유지
+        if intent == "comparison":
+            time_dims = [c for c in candidates if self._is_time_dimension(c["name"])]
+            if time_dims:
+                best_time = max(time_dims, key=lambda x: x.get("score", 0))
+                return [{"name": best_time["name"]}]
+
         # Breakdown/TopN: non-time dimension 필수
         if intent in ["breakdown", "topn"] or modifiers.get("needs_breakdown"):
             non_time = [c for c in candidates if not self._is_time_dimension(c["name"])]
@@ -656,6 +737,8 @@ class GA4Planner:
         filters = {}
         if modifiers.get("event_filter"):
             filters["event_filter"] = modifiers.get("event_filter")
+        if modifiers.get("event_filters"):
+            filters["event_filters"] = list(modifiers.get("event_filters") or [])
         entity_terms = modifiers.get("entity_contains") or modifiers.get("item_name_contains") or []
         if not entity_terms:
             return filters

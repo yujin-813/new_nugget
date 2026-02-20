@@ -53,24 +53,79 @@ def _format_value(value: Any, unit: str) -> str:
     return f"{text}{unit}" if unit else text
 
 
+def _format_dimension_value(key: str, value: Any) -> str:
+    k = str(key or "")
+    v = "" if value is None else str(value).strip()
+    if not v:
+        return v
+    lk = k.lower()
+    if lk == "date":
+        m = re.match(r"^(\d{4})(\d{2})(\d{2})$", v)
+        if m:
+            return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+    if lk == "yearmonth":
+        m = re.match(r"^(\d{4})(\d{2})$", v)
+        if m:
+            return f"{m.group(1)}-{m.group(2)}"
+    if lk == "month" and re.match(r"^\d{1,2}$", v):
+        return f"{int(v):02d}"
+    return v
+
+
 def _is_brief_request(question: str) -> bool:
     q = (question or "").lower()
     return any(k in q for k in ["한줄", "요약", "간단", "짧게", "brief"])
 
 
-def _build_followups(question: str, has_breakdown: bool) -> List[str]:
+def _build_followups(
+    question: str,
+    has_breakdown: bool,
+    raw_data: List[Dict[str, Any]] = None,
+    has_trend: bool = False
+) -> List[str]:
     q = (question or "").lower()
-    followups = []
+    followups: List[str] = []
+    raw_data = raw_data or []
+
+    row0 = raw_data[0] if raw_data and isinstance(raw_data[0], dict) else {}
+    cols = {str(k).lower() for k in row0.keys()}
+
+    def add(item: str):
+        if item and item not in followups:
+            followups.append(item)
+
+    has_revenue = any(k in q for k in ["매출", "수익", "revenue"])
+    has_user = any(k in q for k in ["사용자", "구매자", "후원자", "user", "purchaser"])
+    has_event = any(k in q for k in ["이벤트", "클릭", "event", "click"])
+    has_channel = any(k in q for k in ["채널", "소스", "매체", "유입", "경로", "source", "medium"])
+    has_donation = any(k in q for k in ["후원", "donation"])
+
     compare_tokens = ["비교", "대비", "증감", "차이", "vs"]
     if ("지난주" in q or "이번주" in q or "이번달" in q or "지난달" in q) and not any(t in q for t in compare_tokens):
-        followups.append("이전 기간과 비교해 증감도 보여드릴까요?")
-    if not has_breakdown:
-        followups.append("채널별/디바이스별로 나눠서 볼까요?")
-    topn_friendly = any(k in q for k in ["매출", "이벤트", "구매", "상품", "전환"])
+        add("이전 기간과 비교해 증감도 보여드릴까요?")
+
+    topn_friendly = any(k in q for k in ["매출", "이벤트", "구매", "상품", "전환", "후원"])
     if topn_friendly and "top" not in q and "상위" not in q:
-        followups.append("상위 항목 TOP 10으로 확장할까요?")
+        add("상위 항목 TOP 10으로 확장할까요?")
+
+    if has_revenue and not has_channel:
+        add("매출을 채널/소스/매체로 분해해볼까요?")
+    if has_user and not has_channel:
+        add("사용자 수를 채널/디바이스로 나눠볼까요?")
+    if has_event and ("eventname" not in cols):
+        add("이벤트 이름별로 나눠서 볼까요?")
+    if has_channel and ("session source / medium" not in cols and "session default channel group" not in cols):
+        add("소스/매체 기준으로 더 내려서 볼까요?")
+    if has_donation and "customEvent:donation_name".lower() in cols:
+        add("donation_name 기준으로 purchase와 click을 비교해볼까요?")
+
+    if has_trend:
+        add("이전 기간과 추이를 비교해볼까요?")
     if has_breakdown:
-        followups.append("상위 항목의 원인 분석까지 이어서 볼까요?")
+        add("상위 항목의 원인 분석까지 이어서 볼까요?")
+    if not has_breakdown and not has_trend and not has_channel:
+        add("채널별/디바이스별로 나눠서 볼까요?")
+
     return followups[:3]
 
 
@@ -107,9 +162,31 @@ def _summarize_top_item(row: Dict[str, Any]) -> str:
     return "상위 항목"
 
 
-def _extract_plot_data(blocks: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _extract_plot_data(blocks: List[Dict[str, Any]], question: str = "") -> Dict[str, Any]:
     if not blocks:
         return []
+    q = (question or "").lower()
+
+    def _pick_label_key(keys: List[str], sample: Dict[str, Any]) -> str:
+        preferred = []
+        if any(k in q for k in ["채널", "source", "매체", "경로", "유입"]):
+            preferred += ["sessionDefaultChannelGroup", "sessionSourceMedium", "firstUserSourceMedium"]
+        if any(k in q for k in ["후원", "donation", "프로그램"]):
+            preferred += ["customEvent:donation_name", "itemName", "itemCategory"]
+        if any(k in q for k in ["이벤트", "event", "클릭"]):
+            preferred += ["eventName", "customEvent:menu_name", "customEvent:button_name"]
+        if any(k in q for k in ["국가", "country"]):
+            preferred += ["country", "customEvent:country_name"]
+        if any(k in q for k in ["상품", "item"]):
+            preferred += ["itemName", "itemCategory", "itemId"]
+        preferred += ["date", "yearMonth", "eventName", "itemName", "itemCategory", "country"]
+        for p in preferred:
+            if p in keys and _to_number(sample.get(p)) is None:
+                return p
+        for k in keys:
+            if _to_number(sample.get(k)) is None:
+                return k
+        return keys[0] if keys else ""
 
     # 1) breakdown/trend list data -> category chart
     for block in blocks:
@@ -124,13 +201,9 @@ def _extract_plot_data(blocks: List[Dict[str, Any]]) -> Dict[str, Any]:
         if not keys:
             continue
 
-        label_key = None
-        for k in keys:
-            if _to_number(sample.get(k)) is None:
-                label_key = k
-                break
-        if label_key is None:
-            label_key = keys[0]
+        label_key = _pick_label_key(keys, sample)
+        if not label_key:
+            continue
 
         metric_keys = []
         for k in keys:
@@ -145,11 +218,20 @@ def _extract_plot_data(blocks: List[Dict[str, Any]]) -> Dict[str, Any]:
         if not metric_keys:
             continue
 
-        labels = [str(r.get(label_key, "")) for r in rows]
+        processed_rows = rows
+        if any(x in q for x in ["not set 제외", "(not set) 제외", "빈값 제외", "제외"]):
+            def _valid_label(v):
+                s = str(v or "").strip().lower()
+                return s not in {"", "(not set)", "not set", "none", "null"}
+            processed_rows = [r for r in rows if _valid_label(r.get(label_key))]
+            if not processed_rows:
+                processed_rows = rows
+
+        labels = [_format_dimension_value(str(label_key), r.get(label_key, "")) for r in processed_rows]
         series = []
         for mk in metric_keys:
             data = []
-            for r in rows:
+            for r in processed_rows:
                 num = _to_number(r.get(mk))
                 data.append(num if num is not None else 0.0)
             series.append({"name": mk, "data": data})
@@ -163,11 +245,23 @@ def _extract_plot_data(blocks: List[Dict[str, Any]]) -> Dict[str, Any]:
                 lb = item[0]
                 if re.match(r"^\d{4}-\d{2}-\d{2}$", lb):
                     return lb
+                m = re.match(r"^(\d{4})(\d{2})(\d{2})$", str(lb))
+                if m:
+                    return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+                if re.match(r"^\d{4}-\d{2}$", lb):
+                    return lb + "-01"
                 return f"9999-{lb}"
             pairs.sort(key=_date_key)
             labels = [p[0] for p in pairs]
             for idx, s in enumerate(series):
                 s["data"] = [p[idx + 1] for p in pairs]
+        else:
+            # 카테고리 차트 과밀 방지: 상위 10개만 표시
+            if len(labels) > 12 and series and series[0].get("data"):
+                idx_sorted = sorted(range(len(labels)), key=lambda i: series[0]["data"][i], reverse=True)[:10]
+                labels = [labels[i] for i in idx_sorted]
+                for s in series:
+                    s["data"] = [s["data"][i] for i in idx_sorted]
 
         return {"type": chart_type, "labels": labels, "series": series}
 
@@ -236,7 +330,14 @@ def _format_top_rows(data: List[Dict[str, Any]], max_rows: int = 10) -> List[str
             v = row.get(k)
             if isinstance(v, (dict, list)):
                 continue
-            parts.append(f"{_label(str(k))}: {_pretty(str(k), v)}")
+            lk = str(k).lower()
+            if lk in {"yearmonth", "month"}:
+                shown = _format_dimension_value(str(k), v)
+            elif _to_number(v) is None:
+                shown = _format_dimension_value(str(k), v)
+            else:
+                shown = _pretty(str(k), v)
+            parts.append(f"{_label(str(k))}: {shown}")
             limit = 4 if has_custom else 2
             if len(parts) >= limit:
                 break
@@ -417,6 +518,68 @@ def _build_donation_type_conversion_message(question: str, rows: List[Dict[str, 
     return "\n".join(lines) if valid else ""
 
 
+def _build_week_compare_message(question: str, rows: List[Dict[str, Any]]) -> str:
+    q = (question or "").lower()
+    if not ("지난주" in q and ("그 전주" in q or "전주" in q)):
+        return ""
+    if not rows or not isinstance(rows[0], dict):
+        return ""
+    sample = rows[0]
+    label_key = None
+    # 시간 라벨 키는 우선순위를 둬서 식별한다.
+    for cand in ["date", "week", "yearMonth", "yearmonth"]:
+        for k in sample.keys():
+            if str(k).lower() == cand.lower():
+                label_key = k
+                break
+        if label_key is not None:
+            break
+
+    if label_key is None:
+        for k, v in sample.items():
+            lk = str(k).lower()
+            if lk in {"week", "date", "yearmonth"} or _to_number(v) is None:
+                label_key = k
+                break
+
+    metric_key = None
+    for k, v in sample.items():
+        if k == label_key:
+            continue
+        lk = str(k).lower()
+        if lk in {"date", "week", "yearmonth"}:
+            continue
+        if _to_number(v) is not None:
+            metric_key = k
+            break
+
+    if not label_key or not metric_key:
+        return ""
+
+    vals = []
+    for r in rows:
+        label = str(r.get(label_key, ""))
+        num = _to_number(r.get(metric_key))
+        if num is None:
+            continue
+        vals.append((label, num))
+    if len(vals) < 2:
+        return ""
+    vals.sort(key=lambda x: x[0])
+    prev_label, prev_val = vals[-2]
+    cur_label, cur_val = vals[-1]
+    delta_pct = ((cur_val - prev_val) / prev_val * 100) if prev_val else 0.0
+    sign = "증가" if delta_pct >= 0 else "감소"
+    unit = "명" if any(k in str(metric_key).lower() for k in ["user", "purchaser"]) else ""
+    metric_label = "활성 사용자" if any(k in str(metric_key).lower() for k in ["activeuser", "user"]) else "값"
+    return (
+        f"{cur_label} vs {prev_label} {metric_label} 비교입니다.\n"
+        f"- {prev_label}: **{_format_value(prev_val, unit)}**\n"
+        f"- {cur_label}: **{_format_value(cur_val, unit)}**\n"
+        f"- 증감: **{abs(delta_pct):.1f}% {sign}**"
+    )
+
+
 def _extract_named_ratio_keywords(question: str) -> List[str]:
     q = (question or "").strip()
     if not q:
@@ -483,6 +646,123 @@ def _build_named_ratio_message(question: str, rows: List[Dict[str, Any]]) -> str
         lines.append(f"- 기타: **{_format_value(other, '원')}**")
 
     return "요청하신 후원 유형 비중입니다.\n" + "\n".join(lines)
+
+
+def _infer_unit_from_metric_key(metric_key: str) -> str:
+    mk = str(metric_key or "").lower()
+    if any(k in mk for k in ["revenue", "amount", "value"]):
+        return "원"
+    if any(k in mk for k in ["rate", "ratio", "ctr", "roas"]):
+        return "%"
+    if any(k in mk for k in ["user", "purchaser", "buyer"]):
+        return "명"
+    if any(k in mk for k in ["eventcount", "events", "click", "view", "session", "transaction"]):
+        return "회"
+    return ""
+
+
+def _build_python_calc_message(question: str, rows: List[Dict[str, Any]]) -> str:
+    q = (question or "").lower()
+    calc_tokens = ["합계", "총합", "평균", "비중", "비율", "퍼센트", "%", "차이", "증감", "증가율", "감소율", "중앙값", "최댓값", "최소값"]
+    if not any(t in q for t in calc_tokens):
+        return ""
+    if not rows or not isinstance(rows[0], dict):
+        return ""
+
+    sample = rows[0]
+    numeric_keys = [k for k in sample.keys() if _to_number(sample.get(k)) is not None]
+    dim_keys = [k for k in sample.keys() if _to_number(sample.get(k)) is None]
+    if not numeric_keys:
+        return ""
+    metric_key = numeric_keys[0]
+    unit = _infer_unit_from_metric_key(metric_key)
+
+    values = []
+    pairs = []
+    label_key = dim_keys[0] if dim_keys else None
+    for r in rows:
+        v = _to_number(r.get(metric_key))
+        if v is None:
+            continue
+        values.append(v)
+        if label_key:
+            pairs.append((str(r.get(label_key, "")), v))
+    if not values:
+        return ""
+
+    entity_terms = _extract_entity_terms(question)
+    if any(t in q for t in ["비중", "비율", "퍼센트", "%", "차이", "증감", "증가율", "감소율"]) and label_key and entity_terms:
+        matched = []
+        for term in entity_terms:
+            hit = [(lb, v) for (lb, v) in pairs if term and term in lb]
+            if hit:
+                agg = sum(v for _, v in hit)
+                matched.append((term, agg))
+        if len(matched) >= 2:
+            a_name, a_val = matched[0]
+            b_name, b_val = matched[1]
+            total = a_val + b_val
+            if any(t in q for t in ["비중", "비율", "퍼센트", "%"]) and total > 0:
+                a_pct = a_val / total * 100.0
+                b_pct = b_val / total * 100.0
+                return (
+                    f"파이썬 계산 결과입니다.\n"
+                    f"- {a_name}: **{_format_value(a_val, unit)}** ({a_pct:.1f}%)\n"
+                    f"- {b_name}: **{_format_value(b_val, unit)}** ({b_pct:.1f}%)"
+                )
+            diff = a_val - b_val
+            pct = (diff / b_val * 100.0) if b_val else 0.0
+            sign = "증가" if diff >= 0 else "감소"
+            return (
+                f"파이썬 계산 결과입니다.\n"
+                f"- {a_name}: **{_format_value(a_val, unit)}**\n"
+                f"- {b_name}: **{_format_value(b_val, unit)}**\n"
+                f"- 차이: **{_format_value(abs(diff), unit)}** ({abs(pct):.1f}% {sign})"
+            )
+
+    if "합계" in q or "총합" in q:
+        s = sum(values)
+        return f"파이썬 계산 결과: 합계는 **{_format_value(s, unit)}** 입니다."
+    if "평균" in q:
+        avg = sum(values) / len(values)
+        return f"파이썬 계산 결과: 평균은 **{_format_value(avg, unit)}** 입니다."
+    if "중앙값" in q:
+        sorted_vals = sorted(values)
+        mid = len(sorted_vals) // 2
+        med = sorted_vals[mid] if len(sorted_vals) % 2 == 1 else (sorted_vals[mid - 1] + sorted_vals[mid]) / 2
+        return f"파이썬 계산 결과: 중앙값은 **{_format_value(med, unit)}** 입니다."
+    if "최댓값" in q:
+        return f"파이썬 계산 결과: 최댓값은 **{_format_value(max(values), unit)}** 입니다."
+    if "최소값" in q:
+        return f"파이썬 계산 결과: 최솟값은 **{_format_value(min(values), unit)}** 입니다."
+    if any(t in q for t in ["증감", "증가율", "감소율"]) and len(values) >= 2:
+        first = values[0]
+        last = values[-1]
+        diff = last - first
+        pct = (diff / first * 100.0) if first else 0.0
+        sign = "증가" if diff >= 0 else "감소"
+        return f"파이썬 계산 결과: 시작 대비 **{abs(pct):.1f}% {sign}** 입니다. (차이 {_format_value(abs(diff), unit)})"
+    return ""
+
+
+def _build_type_axis_note(question: str, rows: List[Dict[str, Any]]) -> str:
+    q = (question or "").lower()
+    if not any(k in q for k in ["유형", "타입", "종류"]):
+        return ""
+    if any(k in q for k in ["후원명", "donation_name", "상품유형", "상품 유형", "상품 카테고리"]):
+        return ""
+    if not rows or not isinstance(rows[0], dict):
+        return ""
+    keys = set(rows[0].keys())
+    has_regular = "customEvent:is_regular_donation" in keys
+    has_name = "customEvent:donation_name" in keys
+    has_item_cat = "itemCategory" in keys
+    if has_regular and not has_name and not has_item_cat:
+        return (
+            "유형 기준이 모호해 우선 `정기/일시` 기준으로 집계했습니다. "
+            "원하시면 `후원명(donation_name)` 또는 `상품유형(itemCategory)` 기준으로 다시 보여드릴게요."
+        )
+    return ""
 
 
 def _build_item_profile_message(question: str, rows: List[Dict[str, Any]]) -> str:
@@ -557,17 +837,24 @@ def _extract_entity_terms(question: str) -> List[str]:
     candidates.extend(re.findall(r"([가-힣A-Za-z0-9_\-/\[\] ]{2,40})\s*(?:에\s*대해|에\s*대해서|관련|기준|만|비중|추이|원인|정보)", q))
     candidates.extend(re.findall(r"([가-힣A-Za-z0-9_\-/\[\]]{2,30})\s*[와과]\s*([가-힣A-Za-z0-9_\-/\[\]]{2,30})", q))
     candidates.extend(re.findall(r"([가-힣A-Za-z0-9_\-/\[\] ]{2,30})\s*,\s*([가-힣A-Za-z0-9_\-/\[\] ]{2,30})\s*같은", q))
+    candidates.extend(re.findall(r"([가-힣A-Za-z0-9_\-/\[\]]{2,40})\s*의\s*", q))
     candidates.extend(re.findall(r"([가-힣A-Za-z0-9_]+후원)", q))
+    candidates.extend(re.findall(r"([가-힣A-Za-z0-9_\-/\[\]]{2,40})\s*(?:은|는|이|가)\s*(?:얼마나|어때|뭐야|무엇|어떤|얼마|몇)", q))
     flat = []
     for c in candidates:
         if isinstance(c, tuple):
             flat.extend(list(c))
         else:
             flat.append(c)
+    for token in ["display", "paid", "organic", "direct", "referral", "unassigned", "cross-network"]:
+        if token in q.lower():
+            flat.append(token)
     stop = {
         "무엇", "어떤", "더", "알", "수", "있어", "있는", "기준", "관련", "정보",
         "비중", "추이", "원인", "분석", "상세", "매개변수", "파라미터", "항목", "상품", "아이템",
-        "후원 이름", "후원명", "donation_name", "이탈", "이탈율", "이탈률", "활성", "신규", "매출", "수익", "세션", "전환"
+        "후원 이름", "후원명", "donation_name", "이탈", "이탈율", "이탈률", "활성", "신규", "매출", "수익", "세션", "전환",
+        "첫후원", "첫구매", "처음후원", "처음구매", "구매한", "사용자수", "사용자 수",
+        "후원자", "구매자", "유형", "타입", "전체"
     }
     uniq = []
     seen = set()
@@ -576,7 +863,7 @@ def _extract_entity_terms(question: str) -> List[str]:
         while True:
             prev = t
             t = re.sub(r"\s*(관련|기준|정보|상세|매출|전환|추이|원인|분석|채널|캠페인)$", "", t).strip()
-            t = re.sub(r"(은|는|이|가|을|를|에|의)$", "", t).strip()
+            t = re.sub(r"(은|는|이|가|을|를|에|의|중|중에|쪽|쪽에)$", "", t).strip()
             if t == prev:
                 break
         t = re.sub(r"^(어떤|무슨|무엇)\s*", "", t).strip()
@@ -738,10 +1025,23 @@ def adapt_pipeline_response_to_legacy(
             first = data[0] if isinstance(data[0], dict) else None
             if block_type == "trend":
                 if first:
-                    date_key = next((k for k, v in first.items() if isinstance(v, str) and re.match(r"^\d{4}-\d{2}-\d{2}", str(v))), None)
+                    date_key = next((
+                        k for k, v in first.items()
+                        if isinstance(v, str) and (
+                            re.match(r"^\d{4}-\d{2}-\d{2}$", str(v)) or
+                            re.match(r"^\d{8}$", str(v))
+                        )
+                    ), None)
                     if date_key:
-                        date_vals = [str(r.get(date_key, "")) for r in data if isinstance(r, dict)]
-                        date_vals = [d for d in date_vals if re.match(r"^\d{4}-\d{2}-\d{2}$", d)]
+                        date_vals = []
+                        for r in data:
+                            if not isinstance(r, dict):
+                                continue
+                            raw = str(r.get(date_key, ""))
+                            if re.match(r"^\d{4}-\d{2}-\d{2}$", raw):
+                                date_vals.append(raw)
+                            elif re.match(r"^\d{8}$", raw):
+                                date_vals.append(f"{raw[:4]}-{raw[4:6]}-{raw[6:8]}")
                         date_vals.sort()
                         start = date_vals[0] if date_vals else data[0].get(date_key)
                         end = date_vals[-1] if date_vals else data[-1].get(date_key)
@@ -770,12 +1070,21 @@ def adapt_pipeline_response_to_legacy(
     domestic_overseas_msg = _build_domestic_overseas_message(question, raw_data)
     if domestic_overseas_msg:
         message_parts = [domestic_overseas_msg] + message_parts
+    week_compare_msg = _build_week_compare_message(question, raw_data)
+    if week_compare_msg:
+        message_parts = [week_compare_msg] + message_parts
     conversion_msg = _build_donation_type_conversion_message(question, raw_data)
     if conversion_msg:
         message_parts = [conversion_msg] + message_parts
     profile_msg = _build_item_profile_message(question, raw_data)
     if profile_msg:
         message_parts = [profile_msg] + message_parts
+    calc_msg = _build_python_calc_message(question, raw_data)
+    if calc_msg:
+        message_parts = [calc_msg] + message_parts
+    type_axis_note = _build_type_axis_note(question, raw_data)
+    if type_axis_note:
+        message_parts = [type_axis_note] + message_parts
     
     # 최종 메시지
     if not message_parts:
@@ -788,11 +1097,20 @@ def adapt_pipeline_response_to_legacy(
         if quality_warnings:
             final_message = final_message + ("\n" if not concise else " ") + quality_warnings[0]
     
+    has_trend_block = any(b.get("type") == "trend" for b in breakdown_blocks)
+    period_text = str(pipeline_response.get("period") or "").strip()
+
     return {
         "message": final_message,
         "raw_data": raw_data,
         "structured": structured,
-        "plot_data": _extract_plot_data(blocks),
+        "period": period_text if period_text else None,
+        "plot_data": _extract_plot_data(blocks, question=question),
         "matching_debug": matching_debug,
-        "followup_suggestions": _build_followups(question, has_breakdown=bool(breakdown_blocks))
+        "followup_suggestions": _build_followups(
+            question,
+            has_breakdown=bool(breakdown_blocks),
+            raw_data=raw_data,
+            has_trend=has_trend_block
+        )
     }

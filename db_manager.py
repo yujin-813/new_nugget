@@ -92,6 +92,29 @@ class DBManager:
                         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
                     )''')
 
+        # 9. qa_failure_logs table (explicit user feedback logs)
+        c.execute('''CREATE TABLE IF NOT EXISTS qa_failure_logs (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        user_id TEXT,
+                        conversation_id TEXT,
+                        feedback_text TEXT,
+                        target_question TEXT,
+                        target_response_json TEXT,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                    )''')
+
+        # 10. webhook_presets table (named webhook storage)
+        c.execute('''CREATE TABLE IF NOT EXISTS webhook_presets (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        user_id TEXT,
+                        channel TEXT,
+                        name TEXT,
+                        url TEXT,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(user_id, channel, name)
+                    )''')
+
         # Backward-compatible migration
         try:
             c.execute("ALTER TABLE interaction_logs ADD COLUMN feedback_label TEXT DEFAULT 'unlabeled'")
@@ -512,10 +535,75 @@ class DBManager:
                 1 if has_raw_data else 0,
                 1 if abstained else 0
             ))
+            interaction_id = c.lastrowid
             conn.commit()
             conn.close()
+            return int(interaction_id) if interaction_id else None
         except Exception as e:
             logging.error(f"[DBManager] Failed to log interaction: {e}")
+            return None
+
+    @staticmethod
+    def mark_last_interaction_bad(conversation_id, note=None):
+        """Mark latest interaction in a conversation as bad."""
+        if not conversation_id:
+            return False
+        try:
+            DBManager._ensure_interaction_schema()
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            c.execute("""
+                SELECT id, feedback_note
+                FROM interaction_logs
+                WHERE conversation_id = ?
+                ORDER BY id DESC
+                LIMIT 1
+            """, (conversation_id,))
+            row = c.fetchone()
+            if not row:
+                conn.close()
+                return False
+            interaction_id = int(row[0])
+            prev_note = str(row[1] or "").strip()
+            new_note = str(note or "").strip()
+            merged_note = new_note if not prev_note else (prev_note + (" | " + new_note if new_note else ""))
+            c.execute("""
+                UPDATE interaction_logs
+                SET feedback_label = 'bad',
+                    feedback_note = ?,
+                    labeled_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            """, (merged_note or None, interaction_id))
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            logging.error(f"[DBManager] Failed to mark last interaction bad: {e}")
+            return False
+
+    @staticmethod
+    def log_failure_feedback(user_id, conversation_id, feedback_text, target_question=None, target_response=None):
+        """Persist explicit user failure feedback for regression datasets."""
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            c.execute("""
+                INSERT INTO qa_failure_logs
+                (user_id, conversation_id, feedback_text, target_question, target_response_json, created_at)
+                VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """, (
+                user_id,
+                conversation_id,
+                str(feedback_text or ""),
+                str(target_question or "") if target_question is not None else None,
+                json.dumps(target_response, ensure_ascii=False) if isinstance(target_response, (dict, list)) else (str(target_response) if target_response is not None else None)
+            ))
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            logging.error(f"[DBManager] Failed to log failure feedback: {e}")
+            return False
 
     @staticmethod
     def get_learning_status(user_id, days=30):
@@ -767,6 +855,96 @@ class DBManager:
             return {"total": 0, "counts": {}, "good_rate": 0.0}
 
     @staticmethod
+    def get_regression_snapshot(user_id=None, days=14, limit=200):
+        """Aggregate recent good/bad signals for regression monitoring."""
+        try:
+            DBManager._ensure_interaction_schema()
+            d = max(1, min(int(days), 3650))
+            lim = max(10, min(int(limit), 5000))
+            params = [f"-{d} days"]
+            where = ["created_at >= datetime('now', ?)"]
+            if user_id:
+                where.append("user_id = ?")
+                params.append(user_id)
+
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+
+            c.execute(f"""
+                SELECT route, feedback_label, COUNT(*)
+                FROM interaction_logs
+                WHERE {' AND '.join(where)}
+                GROUP BY route, feedback_label
+            """, tuple(params))
+            rows = c.fetchall() or []
+
+            c.execute(f"""
+                SELECT question, COUNT(*) AS cnt
+                FROM interaction_logs
+                WHERE {' AND '.join(where)}
+                  AND feedback_label = 'bad'
+                  AND question IS NOT NULL
+                  AND TRIM(question) != ''
+                GROUP BY question
+                ORDER BY cnt DESC
+                LIMIT ?
+            """, tuple(params + [lim]))
+            bad_q_rows = c.fetchall() or []
+            conn.close()
+
+            by_route = {}
+            total = 0
+            good = 0
+            bad = 0
+            for r, lb, cnt in rows:
+                rt = str(r or "unknown")
+                lb2 = str(lb or "unlabeled")
+                cnum = int(cnt or 0)
+                total += cnum
+                if lb2 == "good":
+                    good += cnum
+                if lb2 == "bad":
+                    bad += cnum
+                by_route.setdefault(rt, {}).setdefault(lb2, 0)
+                by_route[rt][lb2] += cnum
+
+            route_summary = []
+            for rt, obj in by_route.items():
+                r_total = sum(obj.values())
+                r_bad = int(obj.get("bad", 0))
+                route_summary.append({
+                    "route": rt,
+                    "total": r_total,
+                    "good": int(obj.get("good", 0)),
+                    "bad": r_bad,
+                    "bad_rate": round((r_bad / r_total) * 100, 2) if r_total else 0.0
+                })
+            route_summary.sort(key=lambda x: (-x["bad_rate"], -x["total"]))
+
+            return {
+                "days": d,
+                "total": total,
+                "good": good,
+                "bad": bad,
+                "good_rate": round((good / total) * 100, 2) if total else 0.0,
+                "bad_rate": round((bad / total) * 100, 2) if total else 0.0,
+                "route_summary": route_summary,
+                "top_bad_questions": [{"question": str(q), "count": int(c)} for q, c in bad_q_rows]
+            }
+        except Exception as e:
+            logging.error(f"[DBManager] Failed to get regression snapshot: {e}")
+            return {
+                "days": max(1, int(days)),
+                "total": 0,
+                "good": 0,
+                "bad": 0,
+                "good_rate": 0.0,
+                "bad_rate": 0.0,
+                "route_summary": [],
+                "top_bad_questions": []
+            }
+
+    @staticmethod
     def get_matching_status(user_id, days=30):
         """Return local-LLM matching contribution stats from logged responses."""
         try:
@@ -815,3 +993,104 @@ class DBManager:
                 "responses_with_local_llm_used": 0,
                 "local_llm_used_rate": 0.0,
             }
+
+    @staticmethod
+    def get_recent_bad_questions(user_id, limit=200):
+        """Return recent bad-labeled user questions for regression guardrails."""
+        try:
+            lim = max(1, min(int(limit), 2000))
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            c.execute("""
+                SELECT question
+                FROM interaction_logs
+                WHERE user_id = ?
+                  AND feedback_label = 'bad'
+                  AND question IS NOT NULL
+                  AND TRIM(question) != ''
+                ORDER BY id DESC
+                LIMIT ?
+            """, (user_id, lim))
+            rows = c.fetchall() or []
+            conn.close()
+            return [str(r[0]) for r in rows if r and r[0]]
+        except Exception as e:
+            logging.error(f"[DBManager] Failed to get recent bad questions: {e}")
+            return []
+
+    @staticmethod
+    def list_webhook_presets(user_id, channel=None):
+        """List saved webhook presets for a user."""
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            if channel:
+                c.execute("""
+                    SELECT id, channel, name, url, created_at, updated_at
+                    FROM webhook_presets
+                    WHERE user_id = ? AND channel = ?
+                    ORDER BY name ASC
+                """, (user_id, str(channel)))
+            else:
+                c.execute("""
+                    SELECT id, channel, name, url, created_at, updated_at
+                    FROM webhook_presets
+                    WHERE user_id = ?
+                    ORDER BY channel ASC, name ASC
+                """, (user_id,))
+            rows = c.fetchall() or []
+            conn.close()
+            return [
+                {
+                    "id": int(r[0]),
+                    "channel": str(r[1]),
+                    "name": str(r[2]),
+                    "url": str(r[3]),
+                    "created_at": r[4],
+                    "updated_at": r[5]
+                } for r in rows
+            ]
+        except Exception as e:
+            logging.error(f"[DBManager] Failed to list webhook presets: {e}")
+            return []
+
+    @staticmethod
+    def save_webhook_preset(user_id, channel, name, url):
+        """Save or update a named webhook preset."""
+        try:
+            if not user_id or not channel or not name or not url:
+                return False
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            c.execute("""
+                INSERT INTO webhook_presets (user_id, channel, name, url, created_at, updated_at)
+                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT(user_id, channel, name)
+                DO UPDATE SET
+                    url=excluded.url,
+                    updated_at=CURRENT_TIMESTAMP
+            """, (str(user_id), str(channel), str(name), str(url)))
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            logging.error(f"[DBManager] Failed to save webhook preset: {e}")
+            return False
+
+    @staticmethod
+    def delete_webhook_preset(user_id, preset_id):
+        """Delete one webhook preset by id (scoped by user)."""
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            c.execute("""
+                DELETE FROM webhook_presets
+                WHERE id = ? AND user_id = ?
+            """, (int(preset_id), str(user_id)))
+            deleted = c.rowcount or 0
+            conn.commit()
+            conn.close()
+            return deleted > 0
+        except Exception as e:
+            logging.error(f"[DBManager] Failed to delete webhook preset: {e}")
+            return False

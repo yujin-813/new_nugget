@@ -479,44 +479,100 @@
             background: #fafafa;
         }
 
-        /* Onboarding */
+        /* Onboarding (new home layout) */
         .onboarding {
+            height: 100%;
+            overflow-y: auto;
+            padding: 20px;
+            color: var(--text-main);
+        }
+
+        .home-shell {
+            max-width: 920px;
+            margin: 0 auto;
             display: flex;
             flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            height: 100%;
-            text-align: center;
-            padding: 40px;
-            color: var(--text-muted);
+            gap: 14px;
         }
 
-        .onboarding h1 {
-            color: var(--text-main);
-            margin-bottom: 10px;
-        }
-
-        .onboarding-grid {
-            display: grid;
-            grid-template-columns: repeat(2, 1fr);
-            gap: 20px;
-            margin-top: 30px;
-            max-width: 600px;
-        }
-
-        .onboarding-card {
-            background: #f9f9f9;
-            padding: 20px;
-            border-radius: 12px;
+        .home-section {
+            background: #fff;
             border: 1px solid var(--border-color);
-            cursor: pointer;
-            transition: all 0.2s;
+            border-radius: 14px;
+            padding: 18px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
         }
 
-        .onboarding-card:hover {
-            border-color: var(--primary-color);
-            background: white;
-            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
+        .hero-title {
+            margin: 0;
+            font-size: 28px;
+            font-weight: 800;
+            letter-spacing: -0.6px;
+        }
+
+        .hero-sub {
+            margin: 8px 0 0;
+            color: var(--text-muted);
+            font-size: 13px;
+        }
+
+        .divider-line {
+            border: 0;
+            border-top: 1px dashed #d9d9d9;
+            margin: 4px 0;
+        }
+
+        .status-panel {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .status-row {
+            font-size: 15px;
+            font-weight: 700;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .quick-chip-wrap {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+
+        .quick-chip {
+            border: 1px solid #d6e3ff;
+            background: #eef4ff;
+            color: #2f4f8f;
+            border-radius: 18px;
+            padding: 7px 12px;
+            font-size: 12px;
+            font-weight: 700;
+            cursor: pointer;
+        }
+
+        .quick-chip:hover {
+            background: #dfeaff;
+        }
+
+        .snapshot-list,
+        .recent-report-list {
+            margin: 0;
+            padding-left: 18px;
+            color: #2b3a55;
+            line-height: 1.7;
+        }
+
+        .recent-report-item {
+            cursor: pointer;
+        }
+
+        @media (max-width: 768px) {
+            .hero-title {
+                font-size: 22px;
+            }
         }
 
         /* Modal */
@@ -822,38 +878,61 @@
         <div class="chat-main" id="chat-main">
             <div class="messages-container" id="chat">
                 <div class="onboarding" id="onboarding-ui">
-                    <div
-                        style="background:#fff; padding:40px; border-radius:24px; box-shadow: 0 4px 20px rgba(0,0,0,0.05);">
-                        <h1>반가워요! 무엇을 도와드릴까요?</h1>
-                        <p>NUGGET은 GA4와 파일 데이터를 분석하여 인사이트를 제공합니다.</p>
+                    <div class="home-shell">
+                        <section class="home-section">
+                            <h1 class="hero-title">데이터에게 질문하세요.</h1>
+                            <p class="hero-sub">아래 입력창에 자연어로 질문하면 분석 결과를 바로 보여드립니다.</p>
+                        </section>
 
-                        <div class="onboarding-grid">
-                            <div class="onboarding-card" onclick="openConnectModal()">
-                                <h3>🔌 1. 데이터 연결하기</h3>
-                                <p>GA4 또는 CSV 파일을 연결해 분석을 시작하세요.</p>
+                        <hr class="divider-line">
+
+                        <section class="home-section status-panel">
+                            <div id="connection-state-box" class="status-row">🔌 먼저 데이터를 연결하세요</div>
+                            <div id="connected-actions" class="quick-chip-wrap hidden">
+                                <button class="quick-chip" onclick="setInputAndAsk('지난주 요약 알려줘')">지난주 요약</button>
+                                <button class="quick-chip" onclick="setInputAndAsk('매출 top 알려줘')">매출 TOP</button>
+                                <button class="quick-chip" onclick="setInputAndAsk('유입 분석해줘')">유입 분석</button>
                             </div>
-                            <div class="onboarding-card" onclick="setInputAndAsk('지난주 활성 사용자 수를 알려줘')">
-                                <h3>📊 2. 샘플 질문 해보기</h3>
-                                <p>"지난주 활성 사용자 수는?" 처럼 질문해 보세요.</p>
+                            <div id="disconnected-actions" class="quick-chip-wrap">
+                                <button class="quick-chip" onclick="openConnectModal()">데이터 연결하기</button>
                             </div>
-                            <div class="onboarding-card" onclick="createNewReport()">
-                                <h3>📝 3. 리포트 만들기</h3>
-                                <p>분석 결과를 리포트에 추가하고 관리하세요.</p>
-                            </div>
-                            <div class="onboarding-card" onclick="showDataManagement()">
-                                <h3>📂 4. 데이터 관리</h3>
-                                <p>파일 업로드 및 전처리 데이터를 관리합니다.</p>
-                            </div>
-                        </div>
+                        </section>
+
+                        <hr class="divider-line">
+
+                        <section class="home-section">
+                            <div class="status-row">자동 인사이트 스냅샷</div>
+                            <ul id="auto-insight-list" class="snapshot-list">
+                                <li>지난 7일 매출 +12%</li>
+                                <li>국내사업후원 비중 51%</li>
+                                <li>Organic 채널 18% 성장</li>
+                            </ul>
+                        </section>
+
+                        <hr class="divider-line">
+
+                        <section class="home-section">
+                            <div class="status-row">최근 리포트</div>
+                            <ul id="recent-reports-list" class="recent-report-list">
+                                <li>2026 2월 요약</li>
+                                <li>후원 유형 분석</li>
+                            </ul>
+                        </section>
                     </div>
                 </div>
             </div>
 
             <div class="input-area">
-                <div style="padding:0 16px 8px; display:flex; align-items:center;">
-                    <input type="checkbox" id="auto-add-to-report" style="margin-right:6px; cursor:pointer;">
-                    <label for="auto-add-to-report" style="font-size:12px; color:#666; cursor:pointer;">자동으로 리포트에 추가
-                        (Auto-add to Report)</label>
+                <div style="padding:0 16px 8px; display:flex; align-items:center; gap:18px; flex-wrap:wrap;">
+                    <div style="display:flex; align-items:center;">
+                        <input type="checkbox" id="auto-add-to-report" style="margin-right:6px; cursor:pointer;">
+                        <label for="auto-add-to-report" style="font-size:12px; color:#666; cursor:pointer;">자동으로 리포트에 추가
+                            (Auto-add to Report)</label>
+                    </div>
+                    <div style="display:flex; align-items:center;">
+                        <input type="checkbox" id="beginner-mode" style="margin-right:6px; cursor:pointer;" checked>
+                        <label for="beginner-mode" style="font-size:12px; color:#666; cursor:pointer;">초보자 모드 (쉬운 설명)</label>
+                    </div>
                 </div>
                 <div class="input-wrapper">
                     <input type="text" id="question-input" placeholder="데이터에 대해 질문해 보세요 (예: 지난달 성과 요약해줘)">
@@ -869,9 +948,6 @@
             <div class="report-header">
                 <h3 style="margin:0; font-size:16px;">📄 Report Document</h3>
                 <div style="display:flex; gap:10px;">
-                    <button class="outline-btn" style="color:#333; border-color:#ddd;" onclick="saveReport()">
-                        <i class="fas fa-save"></i> 저장
-                    </button>
                     <button onclick="toggleReportPanel()"
                         style="background:none; border:none; cursor:pointer; font-size:1.2em; color:#666;">&times;</button>
                 </div>
@@ -887,7 +963,7 @@
                     </div>
 
                     <!-- [PHASE 7] View Mode Toggle -->
-                    <div style="display:flex; align-items:center; gap:6px; margin-right:8px;">
+                    <div style="display:flex; align-items:center; gap:6px; margin-right:8px; margin-bottom:10px;">
                         <label class="switch" style="position:relative; display:inline-block; width:34px; height:20px;">
                             <input type="checkbox" id="view-mode-toggle" onchange="toggleViewMode(this)">
                             <span class="slider round"
@@ -917,11 +993,36 @@
                         <span style="font-size:12px; color:#666;">보기 모드</span>
                     </div>
 
-                    <button class="primary-btn" onclick="saveReport()">저장</button>
-                    <button class="outline-btn" style="color:var(--text-main); border-color:var(--text-muted);"
-                        onclick="downloadReportAsImage()">다운로드</button>
-                    <button class="outline-btn" style="color:var(--text-main); border-color:var(--text-muted);"
-                        onclick="exportReportToNotion()">Notion 추출</button>
+                    <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px;">
+                        <button class="primary-btn" onclick="saveReport()">저장</button>
+                        <button class="outline-btn" style="color:var(--text-main); border-color:var(--text-muted);"
+                            onclick="downloadReportAsImage()">PNG 다운로드</button>
+                        <button class="outline-btn" style="color:var(--text-main); border-color:var(--text-muted);"
+                            onclick="exportReportToNotion()">Notion 추출</button>
+                        <button class="outline-btn" style="color:var(--text-main); border-color:var(--text-muted);"
+                            onclick="exportReportToJandi()">JANDI 웹훅 전송</button>
+                    </div>
+
+                    <div style="display:flex; flex-direction:column; gap:8px; margin-bottom:10px; border:1px solid #eee; border-radius:8px; padding:10px;">
+                        <div style="font-size:12px; color:#666; font-weight:700;">JANDI Webhook 설정</div>
+                        <div style="display:flex; gap:8px; align-items:center;">
+                            <input type="text" id="jandi-webhook-name" placeholder="저장 이름 (예: 마케팅팀 잔디)"
+                                style="flex:1; padding:8px; border:1px solid #ddd; border-radius:6px; font-size:12px;">
+                            <button class="outline-btn" style="color:var(--text-main); border-color:var(--text-muted);"
+                                onclick="saveWebhookPreset('jandi')">저장</button>
+                        </div>
+                        <div style="display:flex; gap:8px; align-items:center;">
+                            <select id="jandi-webhook-presets"
+                                style="flex:1; padding:8px; border:1px solid #ddd; border-radius:6px; font-size:12px;"
+                                onchange="applyWebhookPreset('jandi')">
+                                <option value="">저장된 잔디 웹훅 선택</option>
+                            </select>
+                            <button class="outline-btn" style="color:var(--text-main); border-color:var(--text-muted);"
+                                onclick="deleteWebhookPreset('jandi')">삭제</button>
+                        </div>
+                        <input type="text" id="jandi-webhook" placeholder="JANDI Webhook URL"
+                            style="width:100%; padding:8px; border:1px solid #ddd; border-radius:6px; font-size:12px;">
+                    </div>
 
 
                     <!-- [PHASE 3] Report Agent Input -->
@@ -1015,6 +1116,9 @@
             fetchAccounts();
             loadPreprocessedDataOptions();
             loadReportsList();
+            loadWebhookPresets('jandi');
+            updateOnboardingState();
+            renderOnboardingInsights();
 
             const panel = document.getElementById('report-panel');
             panel.classList.add('collapsed');
@@ -1079,6 +1183,68 @@
             fetchTrafficData();
         }
 
+        function isDataConnected() {
+            const ga4Badge = document.getElementById('ga4-status-badge');
+            const fileBadge = document.getElementById('file-status-badge');
+            const ga4Connected = !!ga4Badge && ga4Badge.classList.contains('active') && !/GA4:\s*None/i.test(ga4Badge.innerText || '');
+            const fileConnected = !!fileBadge && fileBadge.classList.contains('active') && !/File:\s*None/i.test(fileBadge.innerText || '');
+            return ga4Connected || fileConnected;
+        }
+
+        function updateOnboardingState() {
+            const stateBox = document.getElementById('connection-state-box');
+            const connectedActions = document.getElementById('connected-actions');
+            const disconnectedActions = document.getElementById('disconnected-actions');
+            if (!stateBox || !connectedActions || !disconnectedActions) return;
+
+            if (isDataConnected()) {
+                stateBox.textContent = '📊 무엇을 분석해볼까요?';
+                connectedActions.classList.remove('hidden');
+                disconnectedActions.classList.add('hidden');
+            } else {
+                stateBox.textContent = '🔌 먼저 데이터를 연결하세요';
+                connectedActions.classList.add('hidden');
+                disconnectedActions.classList.remove('hidden');
+            }
+        }
+
+        function renderOnboardingInsights() {
+            const ul = document.getElementById('auto-insight-list');
+            if (!ul) return;
+            const connected = isDataConnected();
+            if (!connected) {
+                ul.innerHTML = `
+                    <li>데이터 연결 후 자동 인사이트를 표시합니다.</li>
+                    <li>예: 지난 7일 매출 증감, 상위 상품 비중, 유입 채널 변화</li>
+                    <li>질문을 시작하면 대화 결과 기반으로 스냅샷이 갱신됩니다.</li>
+                `;
+                return;
+            }
+            ul.innerHTML = `
+                <li>지난 7일 매출 +12%</li>
+                <li>국내사업후원 비중 51%</li>
+                <li>Organic 채널 18% 성장</li>
+            `;
+        }
+
+        function renderRecentReportsPreview(reports = []) {
+            const ul = document.getElementById('recent-reports-list');
+            if (!ul) return;
+            if (!Array.isArray(reports) || reports.length === 0) {
+                ul.innerHTML = `
+                    <li>저장된 리포트가 없습니다.</li>
+                    <li>분석 결과를 리포트에 추가해 첫 리포트를 만들어보세요.</li>
+                `;
+                return;
+            }
+            const rows = reports.slice(0, 5).map(r => {
+                const title = String(r.title || 'Untitled Report');
+                const id = Number(r.id);
+                return `<li class="recent-report-item" onclick="loadReport(${id})">📄 ${escapeHtml(title)}</li>`;
+            });
+            ul.innerHTML = rows.join('');
+        }
+
         /* =========================
            2. 질문 처리 (안정 버전)
         ========================= */
@@ -1110,24 +1276,31 @@
                 const res = await fetch('/ask_question', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ question })
+                    body: JSON.stringify({
+                        question,
+                        beginner_mode: !!document.getElementById('beginner-mode')?.checked
+                    })
                 });
 
                 const data = await res.json();
                 const response = data.response || {};
+                const interactionId = data.interaction_id || response.interaction_id || null;
+                const periodText = response.period || data.period || null;
+                const dataLabel = response.data_label || null;
+                const collectionPeriod = response.collection_period || null;
 
                 if (response.status === 'clarify') {
                     handleClarifyResponse(response, question);
 
                 } else if (response.blocks && Array.isArray(response.blocks)) {
-                    renderMultiScopeBlocks(response);
+                    renderMultiScopeBlocks(response, interactionId, periodText, dataLabel, collectionPeriod);
 
                 } else {
                     const plotData = response.plot_data || null;
                     const structuredInsight = response.structured_insight || null;
                     const followups = Array.isArray(response.followup_suggestions) ? response.followup_suggestions : [];
                     const botText = response.message || "응답이 없습니다.";
-                    appendMessage('bot', botText, plotData, structuredInsight, followups);
+                    appendMessage('bot', botText, plotData, structuredInsight, followups, interactionId, periodText, dataLabel, collectionPeriod);
                 }
 
                 if (data.route) {
@@ -1175,7 +1348,60 @@
             };
         }
 
-        function renderMultiScopeBlocks(response) {
+        async function labelInteraction(interactionId, label, note = '') {
+            if (!interactionId || !label) return false;
+            try {
+                const res = await fetch('/label_interaction', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ interaction_id: interactionId, label, note })
+                });
+                return res.ok;
+            } catch (err) {
+                console.error('labelInteraction failed:', err);
+                return false;
+            }
+        }
+
+        function addQualityButtons(containerEl, interactionId) {
+            if (!containerEl || !interactionId) return;
+            const wrap = document.createElement('div');
+            wrap.style.display = 'flex';
+            wrap.style.gap = '6px';
+            wrap.style.marginLeft = 'auto';
+
+            const goodBtn = document.createElement('button');
+            goodBtn.className = 'add-to-report';
+            goodBtn.style.backgroundColor = '#2e7d32';
+            goodBtn.textContent = 'Good';
+
+            const badBtn = document.createElement('button');
+            badBtn.className = 'add-to-report';
+            badBtn.style.backgroundColor = '#b71c1c';
+            badBtn.textContent = 'Bad';
+
+            const setLockedState = (chosen, other) => {
+                chosen.disabled = true;
+                other.disabled = true;
+                chosen.style.opacity = '1';
+                other.style.opacity = '0.5';
+            };
+
+            goodBtn.onclick = async () => {
+                const ok = await labelInteraction(interactionId, 'good');
+                if (ok) setLockedState(goodBtn, badBtn);
+            };
+            badBtn.onclick = async () => {
+                const ok = await labelInteraction(interactionId, 'bad');
+                if (ok) setLockedState(badBtn, goodBtn);
+            };
+
+            wrap.appendChild(goodBtn);
+            wrap.appendChild(badBtn);
+            containerEl.appendChild(wrap);
+        }
+
+        function renderMultiScopeBlocks(response, interactionId = null, periodText = null, dataLabel = null, collectionPeriod = null) {
             const chat = document.getElementById('chat');
 
             response.blocks.forEach(block => {
@@ -1183,6 +1409,15 @@
                 card.className = 'analysis-card';
 
                 let html = `<h3>📊 ${block.title || '분석 블록'}</h3>`;
+                if (periodText) {
+                    html += `<div style="font-size:11px;color:#7a7a7a;margin-bottom:8px;">기준 기간: ${escapeHtml(periodText)}</div>`;
+                }
+                const metaParts = [];
+                if (dataLabel) metaParts.push(`소스: ${escapeHtml(dataLabel)}`);
+                if (collectionPeriod) metaParts.push(`수집기간: ${escapeHtml(collectionPeriod)}`);
+                if (metaParts.length > 0) {
+                    html += `<div style="font-size:11px;color:#8a8a8a;margin-bottom:8px;">${metaParts.join(' | ')}</div>`;
+                }
 
                 if (block.scope === "event" && block.data && typeof block.data === "object") {
                     Object.entries(block.data).forEach(([key, value]) => {
@@ -1240,6 +1475,7 @@
                         openReportPanel();
                     };
                     actions.appendChild(reportBtn);
+                    addQualityButtons(actions, interactionId);
 
                     card.appendChild(actions);
                 }
@@ -1302,13 +1538,13 @@
             return clone.innerHTML;
         }
 
-        function appendMessage(role, text, plotData = null, structuredInsight = null, followups = []) {
+        function appendMessage(role, text, plotData = null, structuredInsight = null, followups = [], interactionId = null, periodText = null, dataLabel = null, collectionPeriod = null) {
             const chat = document.getElementById('chat');
             const parsed = extractMessageAndFollowups(text, followups);
 
             // [PHASE 1] Render analysis card if structured insight is available
             if (role === 'bot' && structuredInsight) {
-                renderAnalysisCard(structuredInsight, plotData, parsed.followups);
+                renderAnalysisCard(structuredInsight, plotData, parsed.followups, interactionId, periodText, dataLabel, collectionPeriod);
 
                 // [PHASE 3] Auto-add to report if checkbox is checked
                 const autoAddCheckbox = document.getElementById('auto-add-to-report');
@@ -1361,12 +1597,35 @@
             if (role === 'bot' && parsed.followups.length > 0) {
                 const followupBox = document.createElement('div');
                 followupBox.className = 'followup-box';
-                const listHtml = parsed.followups.map(item => `<li>${escapeHtml(item)}</li>`).join('');
+                const listHtml = parsed.followups.map(item => {
+                    const safe = escapeHtml(item);
+                    return `<li><button type="button" class="quick-chip" style="margin:2px 0;" data-q="${safe}" onclick="setInputAndAsk(this.dataset.q)">${safe}</button></li>`;
+                }).join('');
                 followupBox.innerHTML = `
                     <div class="followup-title">다음 질문 추천</div>
                     <ol class="followup-list">${listHtml}</ol>
                 `;
                 div.appendChild(followupBox);
+            }
+
+            if (role === 'bot' && periodText) {
+                const periodDiv = document.createElement('div');
+                periodDiv.style.marginTop = '8px';
+                periodDiv.style.fontSize = '11px';
+                periodDiv.style.color = '#7a7a7a';
+                periodDiv.textContent = `기준 기간: ${periodText}`;
+                div.appendChild(periodDiv);
+            }
+            if (role === 'bot' && (dataLabel || collectionPeriod)) {
+                const metaDiv = document.createElement('div');
+                metaDiv.style.marginTop = '4px';
+                metaDiv.style.fontSize = '11px';
+                metaDiv.style.color = '#8a8a8a';
+                const metaParts = [];
+                if (dataLabel) metaParts.push(`소스: ${dataLabel}`);
+                if (collectionPeriod) metaParts.push(`수집기간: ${collectionPeriod}`);
+                metaDiv.textContent = metaParts.join(' | ');
+                div.appendChild(metaDiv);
             }
 
             if (role === 'bot') {
@@ -1404,6 +1663,7 @@
                 reportBtn.innerHTML = '<i class="fas fa-file-alt"></i> 리포트에 추가';
                 reportBtn.onclick = () => { addToReport(getReportSafeHtml(div), plotData); openReportPanel(); };
                 btnGroup.appendChild(reportBtn);
+                addQualityButtons(btnGroup, interactionId);
 
                 div.appendChild(btnGroup);
             }
@@ -1412,7 +1672,7 @@
         }
 
         // [PHASE 1] Render Analysis Card
-        function renderAnalysisCard(data, plotData = null, followups = []) {
+        function renderAnalysisCard(data, plotData = null, followups = [], interactionId = null, periodText = null, dataLabel = null, collectionPeriod = null) {
             const chat = document.getElementById('chat');
             const card = document.createElement('div');
             card.className = 'analysis-card';
@@ -1421,6 +1681,15 @@
 
             if (data.main_metric) {
                 html += `<div class="main-metric">${data.main_metric}</div>`;
+            }
+            if (periodText) {
+                html += `<div style="font-size:11px;color:#7a7a7a;margin:6px 0 8px;">기준 기간: ${escapeHtml(periodText)}</div>`;
+            }
+            if (dataLabel || collectionPeriod) {
+                const metaParts = [];
+                if (dataLabel) metaParts.push(`소스: ${escapeHtml(dataLabel)}`);
+                if (collectionPeriod) metaParts.push(`수집기간: ${escapeHtml(collectionPeriod)}`);
+                html += `<div style="font-size:11px;color:#8a8a8a;margin:2px 0 8px;">${metaParts.join(' | ')}</div>`;
             }
 
             if (data.delta) {
@@ -1446,7 +1715,10 @@
             if (Array.isArray(followups) && followups.length > 0) {
                 const followupBox = document.createElement('div');
                 followupBox.className = 'followup-box';
-                const listHtml = followups.map(item => `<li>${escapeHtml(item)}</li>`).join('');
+                const listHtml = followups.map(item => {
+                    const safe = escapeHtml(item);
+                    return `<li><button type="button" class="quick-chip" style="margin:2px 0;" data-q="${safe}" onclick="setInputAndAsk(this.dataset.q)">${safe}</button></li>`;
+                }).join('');
                 followupBox.innerHTML = `
                     <div class="followup-title">다음 질문 추천</div>
                     <ol class="followup-list">${listHtml}</ol>
@@ -1487,6 +1759,7 @@
                 openReportPanel();
             };
             actions.appendChild(reportBtn);
+            addQualityButtons(actions, interactionId);
 
             card.appendChild(actions);
             chat.appendChild(card);
@@ -1568,16 +1841,23 @@
             const botDiv = document.createElement('div');
             botDiv.className = 'message bot-message';
             botDiv.innerHTML = `<p><strong>Bot:</strong> ${data.message}</p>`;
-            const optionsDiv = document.createElement('div');
-            optionsDiv.className = 'clarify-container';
-            data.options.forEach(opt => {
-                const btn = document.createElement('button');
-                btn.innerText = opt;
-                btn.className = 'clarify-chip';
-                btn.onclick = () => { setInputAndAsk(`${originalQuestion} ${opt} 기준으로`); };
-                optionsDiv.appendChild(btn);
-            });
-            botDiv.appendChild(optionsDiv);
+            const options = Array.isArray(data?.options) ? data.options : [];
+            if (options.length > 0) {
+                const optionsDiv = document.createElement('div');
+                optionsDiv.className = 'clarify-container';
+                options.forEach(opt => {
+                    const btn = document.createElement('button');
+                    btn.innerText = String(opt);
+                    btn.className = 'clarify-chip';
+                    btn.onclick = () => {
+                        const v = String(opt).trim();
+                        if (!v) return;
+                        setInputAndAsk(v);
+                    };
+                    optionsDiv.appendChild(btn);
+                });
+                botDiv.appendChild(optionsDiv);
+            }
             chat.appendChild(botDiv);
             chat.scrollTop = chat.scrollHeight;
         }
@@ -1641,6 +1921,8 @@
             if (res.ok) {
                 document.getElementById("ga4-status-badge").innerText = `GA4: ${propertyName}`;
                 document.getElementById("ga4-status-badge").classList.add("active");
+                updateOnboardingState();
+                renderOnboardingInsights();
                 closeConnectModal();
             }
         }
@@ -1673,6 +1955,8 @@
                 badge.innerText = 'File: None';
                 badge.classList.remove('active');
             }
+            updateOnboardingState();
+            renderOnboardingInsights();
         }
 
         /* =========================
@@ -2082,11 +2366,15 @@
                     return;
                 }
 
+                const defaultFilename = String(data.filename || 'report.md');
+                const chosenFilename = askDownloadFilename(defaultFilename, 'md', '저장할 파일명을 입력하세요 (.md)');
+                if (!chosenFilename) return;
+
                 const blob = new Blob([data.markdown || ""], { type: 'text/markdown;charset=utf-8' });
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement('a');
                 a.href = url;
-                a.download = data.filename || 'report.md';
+                a.download = chosenFilename;
                 document.body.appendChild(a);
                 a.click();
                 document.body.removeChild(a);
@@ -2097,6 +2385,128 @@
             }
         }
 
+        async function loadWebhookPresets(channel) {
+            try {
+                const res = await fetch(`/webhook_presets?channel=${encodeURIComponent(channel)}`);
+                const data = await res.json();
+                const selectId = channel === 'notion' ? 'notion-webhook-presets' : 'jandi-webhook-presets';
+                const select = document.getElementById(selectId);
+                if (!select) return;
+                const baseLabel = channel === 'notion' ? '저장된 노션 웹훅 선택' : '저장된 잔디 웹훅 선택';
+                select.innerHTML = `<option value="">${baseLabel}</option>`;
+                const presets = (data && data.success && Array.isArray(data.presets)) ? data.presets : [];
+                presets.forEach(p => {
+                    const opt = document.createElement('option');
+                    opt.value = String(p.id);
+                    opt.textContent = `${p.name}`;
+                    opt.dataset.url = p.url || '';
+                    select.appendChild(opt);
+                });
+            } catch (err) {
+                console.error('Failed to load webhook presets:', err);
+            }
+        }
+
+        function applyWebhookPreset(channel) {
+            const selectId = channel === 'notion' ? 'notion-webhook-presets' : 'jandi-webhook-presets';
+            const inputId = channel === 'notion' ? 'notion-webhook' : 'jandi-webhook';
+            const select = document.getElementById(selectId);
+            const input = document.getElementById(inputId);
+            if (!select || !input) return;
+            const opt = select.options[select.selectedIndex];
+            if (!opt) return;
+            input.value = opt.dataset.url || '';
+        }
+
+        async function saveWebhookPreset(channel) {
+            const nameId = channel === 'notion' ? 'notion-webhook-name' : 'jandi-webhook-name';
+            const inputId = channel === 'notion' ? 'notion-webhook' : 'jandi-webhook';
+            const nameInput = document.getElementById(nameId);
+            const urlInput = document.getElementById(inputId);
+            const name = nameInput ? nameInput.value.trim() : '';
+            const url = urlInput ? urlInput.value.trim() : '';
+            if (!name || !url) {
+                alert('저장 이름과 웹훅 URL을 모두 입력해 주세요.');
+                return;
+            }
+            try {
+                const res = await fetch('/webhook_presets', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ channel, name, url })
+                });
+                const data = await res.json();
+                if (!data.success) {
+                    alert('웹훅 저장 실패: ' + (data.error || '알 수 없는 오류'));
+                    return;
+                }
+                await loadWebhookPresets(channel);
+                alert('웹훅 저장 완료');
+            } catch (err) {
+                console.error('Save webhook preset error:', err);
+                alert('웹훅 저장 중 오류가 발생했습니다.');
+            }
+        }
+
+        async function deleteWebhookPreset(channel) {
+            const selectId = channel === 'notion' ? 'notion-webhook-presets' : 'jandi-webhook-presets';
+            const select = document.getElementById(selectId);
+            if (!select || !select.value) {
+                alert('삭제할 저장 항목을 선택해 주세요.');
+                return;
+            }
+            const presetId = select.value;
+            try {
+                const res = await fetch(`/webhook_presets/${encodeURIComponent(presetId)}`, {
+                    method: 'DELETE'
+                });
+                const data = await res.json();
+                if (!data.success) {
+                    alert('웹훅 삭제 실패: ' + (data.error || '알 수 없는 오류'));
+                    return;
+                }
+                await loadWebhookPresets(channel);
+                const inputId = channel === 'notion' ? 'notion-webhook' : 'jandi-webhook';
+                const i = document.getElementById(inputId);
+                if (i) i.value = '';
+                alert('웹훅 삭제 완료');
+            } catch (err) {
+                console.error('Delete webhook preset error:', err);
+                alert('웹훅 삭제 중 오류가 발생했습니다.');
+            }
+        }
+
+        async function exportReportToJandi() {
+            const column = document.querySelector('.report-column');
+            if (!column || column.children.length === 0) {
+                alert('전송할 리포트 내용이 없습니다.');
+                return;
+            }
+
+            const titleInput = document.getElementById('report-title');
+            const title = titleInput ? (titleInput.value.trim() || "Untitled Report") : "Untitled Report";
+            const content = column.innerHTML;
+            const webhookInput = document.getElementById('jandi-webhook');
+            const webhook_url = webhookInput ? webhookInput.value.trim() : "";
+
+            try {
+                const res = await fetch('/export_report/jandi', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ title, content, webhook_url, send: true })
+                });
+                const data = await res.json();
+                if (!data.success) {
+                    alert('JANDI 전송 실패: ' + (data.error || data.delivery_error || '알 수 없는 오류'));
+                    return;
+                }
+                alert('JANDI 전송 완료');
+            } catch (err) {
+                console.error('JANDI export error:', err);
+                alert('JANDI 전송 중 오류가 발생했습니다.');
+            }
+        }
+
         async function loadReportsList() {
             try {
                 const res = await fetch('/list_reports');
@@ -2104,6 +2514,7 @@
                 const reportsList = document.getElementById('reports-list');
 
                 if (data.success && data.reports && data.reports.length > 0) {
+                    savedReports = data.reports;
                     reportsList.innerHTML = '';
                     data.reports.forEach(report => {
                         const li = document.createElement('li');
@@ -2113,11 +2524,15 @@
                         li.onclick = () => loadReport(report.id);
                         reportsList.appendChild(li);
                     });
+                    renderRecentReportsPreview(savedReports);
                 } else {
+                    savedReports = [];
                     reportsList.innerHTML = '<li style="padding:10px; color:var(--text-muted); font-style:italic;">No saved reports</li>';
+                    renderRecentReportsPreview(savedReports);
                 }
             } catch (err) {
                 console.error('Failed to load reports:', err);
+                renderRecentReportsPreview([]);
             }
         }
 
@@ -2207,7 +2622,52 @@
                 }
             }
         }
-        function downloadReportAsImage() { alert('다운로드 기능 준비 중'); }
+        async function downloadReportAsImage() {
+            const container = document.getElementById('report-container');
+            if (!container) {
+                alert('다운로드할 리포트가 없습니다.');
+                return;
+            }
+            try {
+                const canvas = await html2canvas(container, {
+                    backgroundColor: '#ffffff',
+                    scale: 2,
+                    useCORS: true
+                });
+                const imageUrl = canvas.toDataURL('image/png');
+                const titleInput = document.getElementById('report-title');
+                const title = titleInput ? (titleInput.value.trim() || "report") : "report";
+                const safeName = (title || "report").replace(/[^\w\-. ]/g, "_");
+                const chosenFilename = askDownloadFilename(`${safeName}.png`, 'png', '저장할 파일명을 입력하세요 (.png)');
+                if (!chosenFilename) return;
+                const a = document.createElement('a');
+                a.href = imageUrl;
+                a.download = chosenFilename;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+            } catch (err) {
+                console.error('Download image error:', err);
+                alert('다운로드 중 오류가 발생했습니다.');
+            }
+        }
+        function askDownloadFilename(defaultName, ext, promptText) {
+            const fallback = defaultName || `report.${ext}`;
+            const base = String(fallback).replace(new RegExp(`\\.${ext}$`, 'i'), '');
+            const answer = window.prompt(promptText || '파일명을 입력하세요', base);
+            if (answer === null) return null;
+            const trimmed = String(answer).trim();
+            if (!trimmed) {
+                alert('파일명을 입력해 주세요.');
+                return null;
+            }
+            const safe = trimmed.replace(/[^\w\-. ]/g, "_");
+            if (!safe) {
+                alert('유효한 파일명이 아닙니다.');
+                return null;
+            }
+            return safe.toLowerCase().endsWith(`.${ext}`) ? safe : `${safe}.${ext}`;
+        }
         function uploadFile() { alert('파일 업로드 기능 준비 중'); }
         function loadColumns() { }
 
