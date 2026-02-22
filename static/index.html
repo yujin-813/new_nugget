@@ -11,7 +11,6 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/Sortable/1.14.0/Sortable.min.js"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css">
     <script src="https://cdn.jsdelivr.net/npm/interactjs/dist/interact.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/apexcharts"></script>
     <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;700&display=swap" rel="stylesheet">
     <style>
         :root {
@@ -39,15 +38,51 @@
         }
 
         /* [FIX] Report Chart Responsive */
-        .report-card .apexcharts-canvas {
-            width: 100% !important;
-            max-width: 100%;
+        .pivot-table-wrap {
+            margin-top: 10px;
+            overflow-x: auto;
+            border: 1px solid #e6eaf2;
+            border-radius: 8px;
+            background: #fff;
         }
 
-        /* [FIX] Ensure chart container fits card */
-        .report-card>div[id^="report-chart-"] {
+        .pivot-table {
             width: 100%;
-            overflow: hidden;
+            border-collapse: collapse;
+            font-size: 12px;
+        }
+
+        .pivot-table th,
+        .pivot-table td {
+            border-bottom: 1px solid #eef2f7;
+            padding: 8px 10px;
+            text-align: right;
+            white-space: nowrap;
+        }
+
+        .pivot-table th:first-child,
+        .pivot-table td:first-child {
+            text-align: left;
+            font-weight: 600;
+            color: #2f3e56;
+        }
+
+        .pivot-table thead th {
+            background: #f7f9fc;
+            color: #55637a;
+            font-weight: 700;
+        }
+
+        .pivot-table tfoot td {
+            background: #f7f9fc;
+            font-weight: 700;
+            border-top: 2px solid #dfe7f3;
+        }
+
+        .pivot-note {
+            margin-top: 6px;
+            font-size: 11px;
+            color: #7a879c;
         }
 
         body {
@@ -1107,6 +1142,7 @@
     <script>
         let isFetching = false;
         let savedReports = [];
+        let lastAskedQuestion = '';
 
         /* =========================
            1. 기본 초기화 및 UI 제어
@@ -1263,6 +1299,7 @@
             const input = document.getElementById('question-input');
             const question = input.value.trim();
             if (!question) return;
+            lastAskedQuestion = question;
 
             const onboarding = document.getElementById('onboarding-ui');
             if (onboarding) onboarding.classList.add('hidden');
@@ -1297,6 +1334,10 @@
 
                 } else {
                     const plotData = response.plot_data || null;
+                    if (plotData && typeof plotData === 'object') {
+                        const inferredTopN = inferTopNFromQuestion(question);
+                        if (inferredTopN) plotData.top_n = inferredTopN;
+                    }
                     const structuredInsight = response.structured_insight || null;
                     const followups = Array.isArray(response.followup_suggestions) ? response.followup_suggestions : [];
                     const botText = response.message || "응답이 없습니다.";
@@ -1344,8 +1385,33 @@
                 series: metricKeys.map(k => ({
                     name: k,
                     data: rows.map(r => toNum(r[k]) ?? 0)
-                }))
+                })),
+                top_n: inferTopNFromQuestion(lastAskedQuestion)
             };
+        }
+
+        function inferTopNFromQuestion(question) {
+            const q = String(question || '').toLowerCase();
+            if (!q) return null;
+            const clamp = (n) => {
+                const v = Number(n);
+                if (!Number.isFinite(v)) return null;
+                return Math.max(1, Math.min(200, Math.floor(v)));
+            };
+
+            // "상위 10", "top 10", "top10"
+            let m = q.match(/(?:상위|top)\s*(\d{1,3})/i);
+            if (m) return clamp(m[1]);
+
+            // "1~10", "1-10", "1~ 10위"
+            m = q.match(/1\s*[-~]\s*(\d{1,3})/);
+            if (m) return clamp(m[1]);
+
+            // "10개", "10위까지"
+            m = q.match(/(\d{1,3})\s*(?:개|위)/);
+            if (m && /상위|top|까지|목록|리스트/.test(q)) return clamp(m[1]);
+
+            return null;
         }
 
         async function labelInteraction(interactionId, label, note = '') {
@@ -1450,7 +1516,7 @@
 
                     const vizBtn = document.createElement('button');
                     vizBtn.className = 'add-to-report viz-btn';
-                    vizBtn.innerHTML = '<i class="fas fa-chart-bar"></i> 시각화하기';
+                    vizBtn.innerHTML = '<i class="fas fa-table"></i> 테이블 보기';
                     vizBtn.onclick = () => {
                         const chartId = 'chart-' + generateUniqueId();
                         const chartCont = document.createElement('div');
@@ -1640,7 +1706,7 @@
                     const vizBtn = document.createElement('button');
                     vizBtn.className = 'add-to-report';
                     vizBtn.style.backgroundColor = '#4cd964'; // Green for Viz
-                    vizBtn.innerHTML = '<i class="fas fa-chart-bar"></i> 시각화하기';
+                    vizBtn.innerHTML = '<i class="fas fa-table"></i> 테이블 보기';
                     vizBtn.onclick = () => {
                         const chartId = 'chart-' + generateUniqueId();
                         const chartCont = document.createElement('div');
@@ -1733,7 +1799,7 @@
             if (plotData && plotData.labels && plotData.labels.length > 0) {
                 const vizBtn = document.createElement('button');
                 vizBtn.className = 'add-to-report viz-btn';
-                vizBtn.innerHTML = '<i class="fas fa-chart-bar"></i> 시각화하기';
+                vizBtn.innerHTML = '<i class="fas fa-table"></i> 테이블 보기';
                 vizBtn.onclick = () => {
                     const chartId = 'chart-' + generateUniqueId();
                     const chartCont = document.createElement('div');
@@ -1766,74 +1832,105 @@
             chat.scrollTop = chat.scrollHeight;
         }
 
-        // ApexCharts Rendering [FIXED]
-        function renderApexChart(elementId, plotData) {
-            if (typeof ApexCharts === 'undefined') {
-                console.error("ApexCharts not loaded");
-                return;
-            }
-            if (!plotData || !plotData.labels || !plotData.series) return;
-
-            // [FIX] Check for datetime labels
-            let isDatetime = false;
-            // Check if first label looks like a date (YYYY-MM-DD)
-            if (plotData.labels.length > 0) {
-                const firstLabel = String(plotData.labels[0]);
-                if (firstLabel.match(/^\d{4}-\d{2}-\d{2}/)) {
-                    isDatetime = true;
-                }
-            }
-
-            const options = {
-                series: plotData.series,
-                chart: {
-                    type: plotData.type || 'bar',
-                    height: plotData.height || 350,
-                    width: '100%', // [FIX] Force width to 100%
-                    fontFamily: 'Noto Sans KR, sans-serif',
-                    toolbar: { show: false },
-                    zoom: { enabled: false }
-                },
-                plotOptions: {
-                    bar: { borderRadius: 4, horizontal: false }
-                },
-                dataLabels: { enabled: false },
-                stroke: { curve: 'smooth', width: 2 },
-                xaxis: {
-                    categories: plotData.labels,
-                    type: isDatetime ? 'datetime' : 'category', // [FIX] Use datetime type if detected
-                    labels: {
-                        style: { fontSize: '12px' },
-                        datetimeFormatter: {
-                            year: 'yyyy',
-                            month: 'MMM \'yy',
-                            day: 'dd MMM',
-                            hour: 'HH:mm'
-                        }
-                    },
-                    tooltip: { enabled: false }
-                },
-                yaxis: {
-                    labels: {
-                        formatter: function (val) {
-                            // Format large numbers
-                            if (val >= 1000000) return (val / 1000000).toFixed(1) + 'M';
-                            if (val >= 1000) return (val / 1000).toFixed(1) + 'K';
-                            return val.toLocaleString();
-                        }
-                    }
-                },
-                fill: { opacity: 1 },
-                tooltip: {
-                    x: {
-                        format: isDatetime ? 'dd MMM yyyy' : undefined
-                    }
-                },
-                colors: ['#007bff', '#4cd964', '#ff3b30', '#ffc107', '#6f42c1'] // [v9.2] Varied colors
+        function renderPivotTableInteractive(target, state) {
+            if (!target || !state) return;
+            const { head, baseRows, topN } = state;
+            const sortIdx = Number(state.sortIdx ?? 1);
+            const sortDir = String(state.sortDir || 'desc');
+            const toNumber = (v) => {
+                const n = Number(v);
+                return Number.isFinite(n) ? n : null;
             };
 
-            const chart = new ApexCharts(document.getElementById(elementId), options);
-            chart.render();
+            const rows = [...baseRows];
+            rows.sort((a, b) => {
+                const av = a[sortIdx];
+                const bv = b[sortIdx];
+                const an = toNumber(av);
+                const bn = toNumber(bv);
+                let cmp = 0;
+                if (an !== null && bn !== null) cmp = an - bn;
+                else cmp = String(av ?? '').localeCompare(String(bv ?? ''));
+                return sortDir === 'asc' ? cmp : -cmp;
+            });
+
+            const originalCount = rows.length;
+            const viewRows = rows.slice(0, topN);
+
+            const totals = new Array(head.length - 1).fill(0);
+            viewRows.forEach(r => {
+                for (let i = 1; i < head.length; i++) {
+                    const n = toNumber(r[i]);
+                    if (n !== null) totals[i - 1] += n;
+                }
+            });
+
+            const ths = head.map((h, i) => {
+                const marker = i === sortIdx ? (sortDir === 'asc' ? ' ▲' : ' ▼') : '';
+                const clickable = i > 0 ? 'style="cursor:pointer;" data-sort-col="' + i + '"' : '';
+                return `<th ${clickable}>${escapeHtml(h + marker)}</th>`;
+            }).join('');
+            const thead = `<thead><tr>${ths}</tr></thead>`;
+            const tbody = `<tbody>${viewRows.map(r => `<tr>${r.map((c, i) => `<td>${i === 0 ? escapeHtml(String(c)) : formatPivotValue(c)}</td>`).join('')}</tr>`).join('')}</tbody>`;
+            const tfoot = `<tfoot><tr><td>합계</td>${totals.map(v => `<td>${formatPivotValue(v)}</td>`).join('')}</tr></tfoot>`;
+            const note = originalCount > topN ? `<div class="pivot-note">총 ${originalCount.toLocaleString()}행 중 상위 ${topN.toLocaleString()}행만 표시</div>` : '';
+            target.innerHTML = `<div class="pivot-table-wrap"><table class="pivot-table">${thead}${tbody}${tfoot}</table></div>${note}`;
+
+            target.querySelectorAll('th[data-sort-col]').forEach(th => {
+                th.addEventListener('click', () => {
+                    const nextIdx = Number(th.getAttribute('data-sort-col'));
+                    if (state.sortIdx === nextIdx) {
+                        state.sortDir = state.sortDir === 'asc' ? 'desc' : 'asc';
+                    } else {
+                        state.sortIdx = nextIdx;
+                        state.sortDir = 'desc';
+                    }
+                    renderPivotTableInteractive(target, state);
+                });
+            });
+        }
+
+        // Pivot table rendering (replaces chart rendering)
+        function renderApexChart(elementId, plotData) {
+            if (!plotData || !plotData.labels || !plotData.series) return;
+            const target = document.getElementById(elementId);
+            if (!target) return;
+            const labels = Array.isArray(plotData.labels) ? plotData.labels : [];
+            const series = Array.isArray(plotData.series) ? plotData.series : [];
+            if (labels.length === 0 || series.length === 0) return;
+
+            const head = ['구분'].concat(series.map(s => String(s.name || '값')));
+            const rows = labels.map((lb, idx) => {
+                const r = [String(lb)];
+                series.forEach(s => {
+                    const arr = Array.isArray(s.data) ? s.data : [];
+                    const v = arr[idx];
+                    r.push(v);
+                });
+                return r;
+            });
+
+            // 상위 N (기본 20)
+            const topN = (() => {
+                const n = Number(plotData && plotData.top_n);
+                if (Number.isFinite(n) && n > 0) return Math.max(1, Math.min(200, Math.floor(n)));
+                const inferred = inferTopNFromQuestion(lastAskedQuestion);
+                return inferred || 20;
+            })();
+            const state = {
+                head,
+                baseRows: rows,
+                topN,
+                sortIdx: 1,
+                sortDir: 'desc'
+            };
+            renderPivotTableInteractive(target, state);
+        }
+
+        function formatPivotValue(v) {
+            const n = Number(v);
+            if (Number.isFinite(n)) return n.toLocaleString();
+            return escapeHtml(String(v ?? ''));
         }
 
         function handleClarifyResponse(data, originalQuestion) {
@@ -2026,7 +2123,7 @@
 
             div.appendChild(actionsDiv);
 
-            // [v9.4] Chart Content in Report with Toggle
+            // [v9.4] Pivot table content in report with toggle
             if (plotData && plotData.labels && plotData.labels.length > 0) {
                 const chartWrapper = document.createElement('div');
                 chartWrapper.style.marginTop = '10px';
@@ -2034,7 +2131,7 @@
                 // Toggle Button
                 const toggleBtn = document.createElement('button');
                 toggleBtn.className = 'outline-btn';
-                toggleBtn.innerHTML = '<i class="fas fa-chart-bar"></i> 차트 숨기기';
+                toggleBtn.innerHTML = '<i class="fas fa-table"></i> 테이블 숨기기';
                 toggleBtn.style.fontSize = '12px';
                 toggleBtn.style.padding = '4px 8px';
                 toggleBtn.style.marginBottom = '8px';
@@ -2044,16 +2141,16 @@
 
                 const chartCont = document.createElement('div');
                 chartCont.id = chartId;
-                chartCont.style.minHeight = '200px';
+                chartCont.style.minHeight = '120px';
                 chartCont.style.transition = 'all 0.3s ease';
 
                 toggleBtn.onclick = () => {
                     if (chartCont.style.display === 'none') {
                         chartCont.style.display = 'block';
-                        toggleBtn.innerHTML = '<i class="fas fa-chart-bar"></i> 차트 숨기기';
+                        toggleBtn.innerHTML = '<i class="fas fa-table"></i> 테이블 숨기기';
                     } else {
                         chartCont.style.display = 'none';
-                        toggleBtn.innerHTML = '<i class="fas fa-chart-bar"></i> 차트 보기';
+                        toggleBtn.innerHTML = '<i class="fas fa-table"></i> 테이블 보기';
                     }
                 };
 
@@ -2061,12 +2158,8 @@
                 chartWrapper.appendChild(chartCont);
                 div.appendChild(chartWrapper);
 
-                // Use a smaller height for report charts
                 setTimeout(() => {
-                    renderApexChart(chartId, {
-                        ...plotData,
-                        height: 250 // Override default height for report
-                    });
+                    renderApexChart(chartId, plotData);
                 }, 100);
             }
 
