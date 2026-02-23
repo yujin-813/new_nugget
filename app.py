@@ -169,6 +169,19 @@ def _jaccard(a: List[str], b: List[str]) -> float:
     return len(sa & sb) / max(1, len(sa | sb))
 
 
+def _to_number(value: Any):
+    if value is None:
+        return None
+    try:
+        text = str(value).strip()
+        text = re.sub(r"[^\d\.\-]", "", text)
+        if text in ("", "-", ".", "-."):
+            return None
+        return float(text)
+    except Exception:
+        return None
+
+
 def _intent_signature(text: str) -> Dict[str, bool]:
     t = (text or "").lower()
     return {
@@ -178,6 +191,124 @@ def _intent_signature(text: str) -> Dict[str, bool]:
         "channel": any(k in t for k in ["채널", "소스", "매체", "경로", "유입", "source", "medium"]),
         "trend": any(k in t for k in ["추이", "트렌드", "흐름", "일별", "월별", "week", "month", "trend"]),
     }
+
+
+def _normalize_text_key(text: str) -> str:
+    t = str(text or "").lower()
+    t = re.sub(r"\s+", "", t)
+    t = re.sub(r"[^0-9a-z가-힣]", "", t)
+    return t
+
+
+def _extract_query_constraints(question: str) -> Dict[str, Any]:
+    q = str(question or "").lower()
+    period = None
+    for p in ["지난주", "이번주", "지난달", "이번달", "오늘", "어제"]:
+        if p in q:
+            period = p
+            break
+    dims = []
+    for k in ["채널별", "상품별", "소스/매체별", "소스별", "매체별", "국가별", "디바이스별", "페이지별"]:
+        if k in q:
+            dims.append(k)
+    compare = any(k in q for k in ["비교", "대비", "이전 기간", "전주", "전월", "증감"])
+    calc_growth = any(k in q for k in ["증감", "증감률", "증가율", "감소율", "%"])
+    output = "table" if any(k in q for k in ["테이블", "표", "피벗"]) else ("summary" if any(k in q for k in ["요약", "정리", "브리핑"]) else None)
+    return {
+        "period": period,
+        "dimensions": dims,
+        "compare": compare,
+        "calc_growth": calc_growth,
+        "output": output,
+    }
+
+
+def _is_expansion_request(question: str) -> bool:
+    q = str(question or "").lower()
+    ext_tokens = ["비교", "증감", "증감률", "채널별", "소스/매체별", "소스별", "매체별", "상품별", "테이블", "표", "원인"]
+    has_ext = any(t in q for t in ext_tokens)
+    sig = _intent_signature(question)
+    has_core = any(sig.values())
+    return has_ext and (len(q) <= 40 or not has_core)
+
+
+def _merge_with_previous_query(current_q: str, previous_q: str) -> str:
+    cur = str(current_q or "").strip()
+    prev = str(previous_q or "").strip()
+    if not cur or not prev:
+        return cur
+
+    c = _extract_query_constraints(cur)
+    p = _extract_query_constraints(prev)
+
+    needs_expand = _is_expansion_request(cur)
+    if needs_expand:
+        merged = f"{prev} 그리고 {cur}"
+    else:
+        merged = cur
+
+    # 비교 요청인데 기간 누락이면 직전 기간 유지
+    if c.get("compare") and not c.get("period") and p.get("period"):
+        merged = f"{p['period']} {merged}"
+
+    # 비교 요청인데 증감률 누락 시 계산 요구 보강
+    if c.get("compare") and not c.get("calc_growth"):
+        merged = f"{merged} 증감과 증감률도 보여줘"
+
+    # 출력 형식 강제
+    if c.get("output") == "table" and ("테이블" not in merged and "표" not in merged):
+        merged = f"{merged} 표(테이블)로 보여줘"
+
+    return re.sub(r"\s+", " ", merged).strip()
+
+
+def _ensure_compare_output_structure(body: Dict[str, Any], question: str) -> Dict[str, Any]:
+    if not isinstance(body, dict):
+        return body
+    q = str(question or "").lower()
+    if not any(k in q for k in ["비교", "대비", "증감", "이전 기간"]):
+        return body
+    msg = str(body.get("message", ""))
+    if "증감률" in msg and "이전 기간" in msg:
+        return body
+    rows = body.get("raw_data")
+    if not (isinstance(rows, list) and len(rows) >= 2 and isinstance(rows[0], dict)):
+        return body
+
+    def _pick_metric_key(sample: Dict[str, Any]) -> str:
+        for k, v in sample.items():
+            lk = str(k).lower()
+            if any(t in lk for t in ["revenue", "매출", "수익", "users", "eventcount", "sessions"]):
+                if _to_number(v) is not None:
+                    return str(k)
+        for k, v in sample.items():
+            if _to_number(v) is not None:
+                return str(k)
+        return ""
+
+    metric_key = _pick_metric_key(rows[0])
+    if not metric_key:
+        return body
+
+    prev_val = _to_number(rows[0].get(metric_key))
+    cur_val = _to_number(rows[-1].get(metric_key))
+    if prev_val is None or cur_val is None:
+        return body
+    diff = cur_val - prev_val
+    pct = None if prev_val == 0 else (diff / prev_val) * 100.0
+    diff_txt = f"{diff:,.0f}"
+    pct_txt = "비교 불가" if pct is None else f"{pct:+.1f}%"
+    table = (
+        f"비교 표:\n"
+        f"| 구분 | 값 |\n"
+        f"|---|---:|\n"
+        f"| 이전 기간 | {prev_val:,.0f} |\n"
+        f"| 현재 기간 | {cur_val:,.0f} |\n"
+        f"| 증감 | {diff_txt} |\n"
+        f"| 증감률 | {pct_txt} |"
+    )
+    body["message"] = (msg.strip() + "\n" + table).strip()
+    return body
 
 
 def _build_reask_suggestions(question: str) -> List[str]:
@@ -531,6 +662,7 @@ def _normalize_followups(route: str, body: Dict[str, Any], current_question: str
 
     out = []
     seen = set()
+    current_key = _normalize_text_key(current_question)
     for f in candidates:
         if not f:
             continue
@@ -541,6 +673,9 @@ def _normalize_followups(route: str, body: Dict[str, Any], current_question: str
         rewritten = _make_followup_actionable(rewritten, last_user_question or current_question)
         s = re.sub(r"\s+", " ", rewritten).strip()
         if not s:
+            continue
+        # 현재 질문 재추천 금지
+        if _normalize_text_key(s) == current_key:
             continue
         # 모호한 재질문 문구 제거(모바일 탭형 클릭 시 품질 저하 방지)
         if any(k in s for k in ["지표명을 포함", "기간을 함께 지정", "차원(예:"]):
@@ -2529,7 +2664,8 @@ def ask_question():
     try:
         data = request.get_json()
         original_question = (data.get('question') or "").strip()
-        question = original_question
+        prev_user_q = str(session.get("last_user_question") or "")
+        question = _merge_with_previous_query(original_question, prev_user_q)
         question = _normalize_summary_request(question)
         beginner_mode = bool(data.get("beginner_mode", False))
         session["beginner_mode"] = beginner_mode
@@ -2817,6 +2953,7 @@ def ask_question():
             r = response.get("route")
             b = response.get("response") if isinstance(response.get("response"), dict) else response
             if isinstance(b, dict):
+                b = _ensure_compare_output_structure(b, original_question)
                 b["message"] = _soften_message_tone(
                     str(b.get("message", "")),
                     question=question
