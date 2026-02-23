@@ -1,0 +1,25 @@
+# Changelog
+
+## v0.9.4 - 2026-02-23
+- Follow-up recommendation quality improved:
+- Converted vague suggestions into directly executable prompts (e.g., channel/source/period split queries).
+- Limited follow-up count for tap-first UX (mobile-first 4 items).
+- Added stronger fallback follow-ups when data match fails.
+- Routing stability improved for ambiguous GA4/File cases:
+- Added GA4-preferred rule for channel/user style questions (e.g., "채널별 사용자수").
+- Reduced unnecessary "GA4 vs 파일" choice prompts when intent is clearly GA4.
+- Added labeled-feedback route hint:
+- Recent `good`/`bad` labels now influence route hinting for similar future questions.
+- Mobile UX refresh (tone preserved):
+- Follow-up cards optimized as large tap targets.
+- Updated visual polish: glass navbar/input feel, floating bottom navigation, clearer active states.
+
+## v0.9.3 - 2026-02-23
+- Mobile app-like navigation introduced (bottom tab / overlay / report panel transitions).
+- Initial optional-login flow completed:
+- No forced login on first entry.
+- Google login requested only when GA4 connection is attempted.
+
+## v0.9.2 - 2026-02-23
+- Responsive layout stabilized across mobile/tablet breakpoints.
+- GA4 connect modal/login UX improved.

@@ -4,6 +4,7 @@ import logging
 import os
 import re
 from datetime import datetime
+from typing import Dict, Any
 
 # DB Path - Absolute Path Fix
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -1017,6 +1018,78 @@ class DBManager:
         except Exception as e:
             logging.error(f"[DBManager] Failed to get recent bad questions: {e}")
             return []
+
+    @staticmethod
+    def get_labeled_route_hint(user_id, question, days=90, limit=500) -> Dict[str, Any]:
+        """
+        Build a lightweight route hint from recent good/bad labeled interactions.
+        Returns: {"route": "ga4|file|mixed", "score": float, "similarity": float} or {}.
+        """
+        try:
+            q = str(question or "").strip().lower()
+            if not q:
+                return {}
+
+            def tok(s: str):
+                return {t for t in re.findall(r"[A-Za-z0-9가-힣_]+", str(s or "").lower()) if len(t) >= 2}
+
+            qtok = tok(q)
+            if not qtok:
+                return {}
+
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            c.execute("""
+                SELECT route, question, feedback_label
+                FROM interaction_logs
+                WHERE user_id = ?
+                  AND created_at >= datetime('now', ?)
+                  AND feedback_label IN ('good','bad')
+                  AND route IN ('ga4','ga4_followup','file','mixed')
+                  AND question IS NOT NULL
+                  AND TRIM(question) != ''
+                ORDER BY id DESC
+                LIMIT ?
+            """, (str(user_id), f"-{int(days)} days", int(max(10, min(limit, 2000)))))
+            rows = c.fetchall() or []
+            conn.close()
+
+            if not rows:
+                return {}
+
+            route_scores: Dict[str, float] = {"ga4": 0.0, "file": 0.0, "mixed": 0.0}
+            best_sim = 0.0
+            best_route = None
+            for r, q2, lb in rows:
+                r0 = "ga4" if str(r) == "ga4_followup" else str(r)
+                if r0 not in route_scores:
+                    continue
+                s2 = tok(str(q2))
+                if not s2:
+                    continue
+                inter = len(qtok & s2)
+                union = len(qtok | s2)
+                sim = (inter / union) if union else 0.0
+                if sim < 0.15:
+                    continue
+                weight = 1.0 if str(lb) == "good" else -1.0
+                route_scores[r0] += (sim * weight)
+                if sim > best_sim:
+                    best_sim = sim
+                    best_route = r0
+
+            ranked = sorted(route_scores.items(), key=lambda x: x[1], reverse=True)
+            top_route, top_score = ranked[0]
+            if top_score <= 0 and best_route is None:
+                return {}
+            return {
+                "route": best_route or top_route,
+                "score": round(float(top_score), 4),
+                "similarity": round(float(best_sim), 4)
+            }
+        except Exception as e:
+            logging.error(f"[DBManager] Failed to get labeled route hint: {e}")
+            return {}
 
     @staticmethod
     def list_webhook_presets(user_id, channel=None):

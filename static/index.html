@@ -92,7 +92,9 @@
             margin: 0;
             padding: 0;
             height: 100vh;
-            background-color: var(--bg-color);
+            background: radial-gradient(1200px 400px at 20% -10%, #dbe8ff 0%, transparent 55%),
+                radial-gradient(900px 300px at 100% 0%, #e6f3ff 0%, transparent 50%),
+                var(--bg-color);
             overflow: hidden;
             display: flex;
             flex-direction: column;
@@ -103,7 +105,8 @@
             display: flex;
             justify-content: space-between;
             align-items: center;
-            background-color: #1a1a1a;
+            background: rgba(20, 24, 32, 0.92);
+            backdrop-filter: blur(8px);
             color: white;
             padding: 0 20px;
             height: var(--navbar-height);
@@ -121,7 +124,7 @@
             font-size: 0.85em;
             padding: 4px 10px;
             border-radius: 20px;
-            background: rgba(255, 255, 255, 0.1);
+            background: rgba(255, 255, 255, 0.12);
             border: 1px solid rgba(255, 255, 255, 0.2);
             color: #ccc;
             display: flex;
@@ -408,7 +411,8 @@
         .input-area {
             padding: 20px;
             border-top: 1px solid var(--border-color);
-            background: white;
+            background: rgba(255, 255, 255, 0.9);
+            backdrop-filter: blur(8px);
         }
 
         .input-wrapper {
@@ -832,14 +836,17 @@
                 display: grid;
                 grid-template-columns: repeat(4, 1fr);
                 position: fixed;
-                left: 0;
-                right: 0;
-                bottom: 0;
+                left: 12px;
+                right: 12px;
+                bottom: 10px;
                 height: var(--mobile-bottom-nav-height);
                 border-top: 1px solid #d7e1f1;
-                background: rgba(255, 255, 255, 0.96);
+                background: rgba(255, 255, 255, 0.94);
                 backdrop-filter: blur(6px);
                 z-index: 1800;
+                border-radius: 16px;
+                box-shadow: 0 10px 30px rgba(35, 58, 92, 0.18);
+                border: 1px solid #d9e5f6;
             }
 
             .mobile-tab-btn {
@@ -858,6 +865,8 @@
 
             .mobile-tab-btn.active {
                 color: var(--primary-color);
+                background: rgba(0, 123, 255, 0.08);
+                border-radius: 12px;
             }
 
             .followup-box {

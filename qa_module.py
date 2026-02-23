@@ -1179,6 +1179,9 @@ def _is_source_ambiguous_question(question: str) -> bool:
     q = str(question or "").lower()
     if not q:
         return False
+    # 채널/소스/매체 + 사용자/구매자 질문은 GA4 우선 (모호성 해소)
+    if _is_ga_preferred_question(question):
+        return False
     has_source_hint = any(k in q for k in ["ga4", "analytics", "파일", "csv", "xlsx", "엑셀"])
     if has_source_hint:
         return False
@@ -1189,6 +1192,24 @@ def _is_source_ambiguous_question(question: str) -> bool:
     common = any(k in q for k in ["사용자", "유저", "회원", "인원", "명", "매출", "수익", "구매", "이벤트"])
     is_short = len(q) <= 30
     return common and is_short
+
+
+def _is_ga_preferred_question(question: str) -> bool:
+    q = str(question or "").lower()
+    if not q:
+        return False
+    has_channel_axis = any(k in q for k in ["채널", "소스", "매체", "유입", "경로", "source", "medium", "campaign"])
+    has_user_metric = any(k in q for k in ["사용자", "유저", "구매자", "후원자", "활성 사용자", "user", "purchaser"])
+    has_ga_event_axis = any(k in q for k in ["event", "이벤트", "click", "클릭"])
+    has_period = any(k in q for k in ["지난주", "지난달", "이번주", "이번달", "오늘", "어제"])
+
+    # 대표 케이스: "채널별 사용자수", "소스/매체별 구매자"
+    if has_channel_axis and (has_user_metric or "매출" in q or "수익" in q):
+        return True
+    # 기간 + 사용자/이벤트 계열은 GA4 시계열로 해석
+    if has_period and (has_user_metric or has_ga_event_axis):
+        return True
+    return False
 
 def _normalize_choice_text(text: str) -> str:
     s = str(text or "").strip().lower()
@@ -1343,23 +1364,37 @@ def handle_question(
 
     active_property = property_id or prev_context.get("property_id") or session.get("property_id")
     active_file = file_path or prev_context.get("file_path") or session.get("uploaded_file_path")
+    # Good/Bad 라벨 기반 라우팅 힌트 (학습 루프 반영)
+    route_hint = DBManager.get_labeled_route_hint(user_id=user_id, question=question)
+    if not forced_route and isinstance(route_hint, dict):
+        hinted_route = str(route_hint.get("route") or "").lower()
+        hint_score = float(route_hint.get("score") or 0.0)
+        if hinted_route in {"ga4", "file", "mixed"} and hint_score > 0:
+            forced_route = hinted_route
+
     if not forced_route and active_property and active_file and _is_source_ambiguous_question(question):
-        # 파일이 질문을 소화할 근거가 약하면 GA4 우선으로 자동 라우팅
-        file_score = _file_capability_score(question, active_file)
-        if file_score < 1:
+        # 이전 맥락이 GA4면 재질문 없이 GA4 유지
+        if str(prev_source or "").lower() in {"ga4", "ga4_followup"}:
+            forced_route = "ga4"
+        elif _is_ga_preferred_question(question):
             forced_route = "ga4"
         else:
-            session["pending_source_choice"] = {"original_question": question}
-            return {
-                "response": {
-                    "message": "이 질문은 GA4와 파일 둘 다에서 해석될 수 있어요. 어느 쪽으로 볼까요?\n1. GA4\n2. 파일",
-                    "status": "clarify",
-                    "plot_data": [],
-                    "followup_suggestions": ["1번", "2번"],
-                    "options": ["1번", "2번"]
-                },
-                "route": "system"
-            }
+            # 파일이 질문을 소화할 근거가 약하면 GA4 우선으로 자동 라우팅
+            file_score = _file_capability_score(question, active_file)
+            if file_score < 2:
+                forced_route = "ga4"
+            else:
+                session["pending_source_choice"] = {"original_question": question}
+                return {
+                    "response": {
+                        "message": "이 질문은 GA4와 파일 둘 다에서 해석될 수 있어요. 어느 쪽으로 볼까요?\n1. GA4\n2. 파일",
+                        "status": "clarify",
+                        "plot_data": [],
+                        "followup_suggestions": ["1번", "2번"],
+                        "options": ["1번", "2번"]
+                    },
+                    "route": "system"
+                }
 
     route, is_explicit = QueryRouter.determine_route(question, conversation_id)
     if forced_route:
