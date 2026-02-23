@@ -122,6 +122,30 @@ def _is_feedback_only_text(text: str) -> bool:
     return (len(q) <= 20) and (not any(t in q for t in analytics_tokens))
 
 
+def _is_general_chat_text(text: str) -> bool:
+    q = (text or "").strip().lower()
+    if not q:
+        return False
+    # 데이터 질의 신호가 있으면 일반대화로 보지 않음
+    data_tokens = [
+        "매출", "수익", "사용자", "세션", "전환", "이벤트", "클릭", "구매",
+        "채널", "소스", "매체", "기간", "지난주", "지난달", "이번주", "이번달",
+        "비교", "추이", "top", "상위", "ga4", "파일", "csv", "xlsx"
+    ]
+    if any(t in q for t in data_tokens):
+        return False
+    chat_tokens = [
+        "바보", "멍청", "왜이래", "왜 이래", "욕", "짜증", "화나", "말투",
+        "고마워", "감사", "안녕", "help", "도움", "사용법", "어떻게"
+    ]
+    return any(t in q for t in chat_tokens) or len(q) <= 8
+
+
+def _is_summary_request(text: str) -> bool:
+    q = (text or "").lower()
+    return any(k in q for k in ["요약", "정리", "브리핑", "한눈", "overview"])
+
+
 def _is_valid_http_url(url: str) -> bool:
     try:
         p = urlparse(str(url or "").strip())
@@ -2052,6 +2076,17 @@ def ask_question():
         if not question:
             return jsonify({"error": "Question is required"}), 400
 
+        # 일반 대화/비분석 질문은 친절한 시스템 응답으로 처리
+        if _is_general_chat_text(question):
+            return jsonify({
+                "response": {
+                    "message": "불편을 드려 죄송해요. 질문 의도에 맞게 더 정확히 답변하도록 개선할게요.\n원하시면 바로 데이터 질문으로 이어서 도와드릴게요. 예: `지난주 사용자 수`, `지난주 요약`, `채널별 사용자 수`",
+                    "plot_data": [],
+                    "followup_suggestions": ["지난주 요약 알려줘", "지난주 사용자 수 알려줘", "채널별 사용자 수 알려줘"]
+                },
+                "route": "system"
+            })
+
         # 추천 질문 번호 선택 지원 (예: "1번", "2")
         is_followup_selected = False
         selected_followup_text = None
@@ -2158,6 +2193,47 @@ def ask_question():
                 )
                 if not _is_ga_no_match_response(response2):
                     response = response2
+                # 요약 질문인데 여전히 실패하면 핵심 KPI 질의를 분해 실행해서 합성 응답
+                elif _is_summary_request(question):
+                    period = _extract_period_prefix(question)
+                    summary_queries = [
+                        f"{period}활성 사용자 수 알려줘".strip(),
+                        f"{period}구매 수익 알려줘".strip(),
+                        f"{period}이벤트 TOP 10 보여줘".strip(),
+                    ]
+                    summary_parts = []
+                    for sq in summary_queries:
+                        try:
+                            sr = handle_question(
+                                sq,
+                                property_id=property_id,
+                                file_path=file_path,
+                                user_id=user_id,
+                                conversation_id=conversation_id,
+                                semantic=semantic,
+                                beginner_mode=bool(session.get("beginner_mode", False))
+                            )
+                            if _is_ga_no_match_response(sr):
+                                continue
+                            sb = sr.get("response") if isinstance(sr, dict) and isinstance(sr.get("response"), dict) else sr
+                            smsg = str((sb or {}).get("message", "")).strip() if isinstance(sb, dict) else ""
+                            if smsg:
+                                summary_parts.append(smsg.splitlines()[0])
+                        except Exception:
+                            continue
+                    if summary_parts:
+                        response = {
+                            "route": "ga4",
+                            "response": {
+                                "message": "지난주 요약입니다.\n- " + "\n- ".join(summary_parts[:3]),
+                                "plot_data": [],
+                                "followup_suggestions": [
+                                    "지난주 요약을 채널별로 나눠서 보여줘",
+                                    "지난주 사용자 추이를 일별로 보여줘",
+                                    "지난주 매출 상위 항목 TOP 10 보여줘"
+                                ]
+                            }
+                        }
 
         response = _apply_bad_regression_guard(user_id=user_id, question=question, response=response)
         # guardrail이 과개입해 확인 질문으로 끝난 경우, 실행 가능한 표준 질의로 1회 자동 보정
