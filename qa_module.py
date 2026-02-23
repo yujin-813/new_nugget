@@ -1043,6 +1043,10 @@ class QueryRouter:
         "구매", "매출", "수익", "광고", "campaign", "source", "medium"
     ]
     FILE_KEYWORDS = ["파일", "문서", "업로드", "내용", "컬럼", "열", "행", "csv", "엑셀", "xlsx", "시트", "sheet"]
+    GENERAL_KEYWORDS = [
+        "도움", "help", "사용법", "어떻게", "뭐 물어", "무엇을 물어", "가능해", "할 수 있어",
+        "의도", "질문 추천", "추천 질문", "친절하게", "설명해줘", "설명해 줘"
+    ]
     
 
     @classmethod
@@ -1053,6 +1057,7 @@ class QueryRouter:
         context = DBManager.load_conversation_context(conversation_id) if conversation_id else None
         ga_score = sum(1 for k in cls.GA4_KEYWORDS if k in q)
         file_score = sum(1 for k in cls.FILE_KEYWORDS if k in q)
+        general_score = sum(1 for k in cls.GENERAL_KEYWORDS if k in q)
 
         # 명시적 우선
         if "ga4" in q or "analytics" in q:
@@ -1060,6 +1065,9 @@ class QueryRouter:
         if any(k in q for k in ["csv", "xlsx", "엑셀", "파일", "컬럼", "열"]):
             if ga_score == 0:
                 return "file", True
+        # 분석 신호가 거의 없고 사용법/운영 질문이면 system으로 분기
+        if general_score > 0 and ga_score == 0 and file_score == 0:
+            return "system", False
 
         # 점수 기반 라우팅 (활성 소스보다 질문 신호 우선)
         if ga_score > 0 and file_score == 0:
@@ -1216,7 +1224,26 @@ def _normalize_choice_text(text: str) -> str:
     # markdown/code/backtick/quotes 제거
     s = s.replace("`", "").replace("'", "").replace('"', "")
     s = re.sub(r"\s+", "", s)
+    # 숫자/영문/한글 외 제거 (버튼/복붙 잡음 문자 대응)
+    s = re.sub(r"[^0-9a-z가-힣]", "", s)
     return s
+
+def _is_general_non_data_question(question: str) -> bool:
+    q = str(question or "").strip().lower()
+    if not q:
+        return False
+    data_keywords = [
+        "매출", "수익", "구매", "사용자", "세션", "이벤트", "전환", "채널", "소스", "매체",
+        "추이", "지난주", "지난달", "이번주", "이번달", "top", "상위", "비교", "증감",
+        "파일", "csv", "xlsx", "컬럼", "열", "행", "ga4", "analytics"
+    ]
+    if any(k in q for k in data_keywords):
+        return False
+    general_markers = [
+        "도와", "help", "어떻게", "사용법", "가능", "뭐할수", "무엇을 할 수", "의도", "친절",
+        "추천 질문", "질문 추천", "설명", "왜 그래", "왜이래"
+    ]
+    return any(k in q for k in general_markers) or len(q) <= 14
 
 def _question_intent_flags(question: str):
     q = str(question or "").lower()
@@ -1299,8 +1326,8 @@ def handle_question(
     if pending_source:
         normalized = _normalize_choice_text(question)
         # 선택 루프 방지를 위해 숫자/키워드 해석을 넓게 허용
-        choose_ga = normalized in {"1", "1번", "ga", "ga4", "analytics", "ga로", "ga4로"}
-        choose_file = normalized in {"2", "2번", "file", "파일", "파일로"}
+        choose_ga = normalized in {"1", "1번", "ga", "ga4", "analytics", "ga로", "ga4로"} or bool(re.match(r"^1번?$", normalized))
+        choose_file = normalized in {"2", "2번", "file", "파일", "파일로"} or bool(re.match(r"^2번?$", normalized))
         if choose_ga:
             forced_route = "ga4"
             question = pending_source.get("original_question") or question
@@ -1381,7 +1408,7 @@ def handle_question(
         else:
             # 파일이 질문을 소화할 근거가 약하면 GA4 우선으로 자동 라우팅
             file_score = _file_capability_score(question, active_file)
-            if file_score < 2:
+            if file_score < 4:
                 forced_route = "ga4"
             else:
                 session["pending_source_choice"] = {"original_question": question}
@@ -1436,7 +1463,14 @@ def handle_question(
 
         # 1️⃣ SYSTEM
         if route == "system":
-            msg = f"현재 GA4 속성 [{session.get('property_name', '없음')}]에 연결되어 있습니다."
+            if _is_general_non_data_question(question):
+                msg = (
+                    "좋아요. 질문 의도를 먼저 파악해서 답변하도록 동작합니다.\n"
+                    "데이터 질문은 지표/차원/기간을 자동 해석하고, 일반 질문은 사용법/다음 행동을 친절하게 안내해드릴게요.\n"
+                    "예: `지난주 사용자 추이`, `채널별 구매자`, `파일 구조 설명`, `이 질문을 어떻게 하면 좋아?`"
+                )
+            else:
+                msg = f"현재 GA4 속성 [{session.get('property_name', '없음')}]에 연결되어 있습니다."
             history.add_ai_message(msg)
             return {"response": {"message": msg, "plot_data": []}, "route": "system"}
 
