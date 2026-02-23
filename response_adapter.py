@@ -4,7 +4,6 @@
 새 파이프라인의 응답 형식을 기존 프론트엔드 형식으로 변환
 """
 
-import logging
 from typing import Dict, Any, List
 import re
 

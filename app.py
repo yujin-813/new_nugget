@@ -11,7 +11,6 @@ import googleapiclient.discovery
 import requests
 import os
 import json
-import logging
 import pandas as pd
 import re
 from html import unescape
@@ -21,10 +20,8 @@ from dotenv import load_dotenv
 from typing import Any, Dict, List, Tuple
 from qa_module import handle_question, generate_unique_id
 import base64
-import urllib.parse
 from db_manager import DBManager
 from file_engine import file_engine
-from db_manager import DBManager
 from google.analytics.data_v1beta import BetaAnalyticsDataClient
 from google.analytics.data_v1beta.types import RunReportRequest, DateRange, Dimension, Metric
 DBManager.init_db()
@@ -369,7 +366,7 @@ def _metric_override_from_question(question: str) -> str:
     return ""
 
 
-def _parse_state_delta(question: str, current_state: Dict[str, Any]) -> Dict[str, Any]:
+def _parse_state_delta(question: str) -> Dict[str, Any]:
     q = (question or "").strip()
     ql = q.lower()
     compare = any(k in ql for k in ["비교", "대비", "증감", "전주", "전월", "vs"])
@@ -3113,7 +3110,7 @@ def ask_question():
         original_question = (data.get('question') or "").strip()
         analysis_state = _coerce_analysis_state(session.get("current_analysis_state"))
         if original_question and not _is_general_chat_text(original_question):
-            delta = _parse_state_delta(original_question, analysis_state)
+            delta = _parse_state_delta(original_question)
             analysis_state = _merge_analysis_state(analysis_state, delta)
             session["current_analysis_state"] = analysis_state
 
@@ -3180,7 +3177,7 @@ def ask_question():
 
         # 추천 클릭으로 질문이 치환된 경우 상태도 해당 질문으로 재병합
         if is_followup_selected and selected_followup_text:
-            delta2 = _parse_state_delta(selected_followup_text, analysis_state)
+            delta2 = _parse_state_delta(selected_followup_text)
             analysis_state = _merge_analysis_state(analysis_state, delta2)
             session["current_analysis_state"] = analysis_state
             if _is_likely_ga_data_question(selected_followup_text):
