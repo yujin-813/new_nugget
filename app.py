@@ -167,6 +167,130 @@ def _build_reask_suggestions(question: str) -> List[str]:
     return ["지표명을 포함해 다시 질문해 주세요.", "기간을 함께 지정해볼까요?", "차원(예: 채널/상품)도 함께 지정해볼까요?"]
 
 
+def _extract_period_prefix(text: str) -> str:
+    q = str(text or "").lower()
+    if "지난주" in q:
+        return "지난주 "
+    if "지난달" in q:
+        return "지난달 "
+    if "이번주" in q or "이번 주" in q:
+        return "이번주 "
+    if "이번달" in q or "이번 달" in q:
+        return "이번달 "
+    if "오늘" in q:
+        return "오늘 "
+    if "어제" in q:
+        return "어제 "
+    return ""
+
+
+def _infer_event_name(text: str) -> str:
+    q = str(text or "")
+    m = re.search(r"\b([a-z][a-z0-9_]{2,})\b", q.lower())
+    if m and any(t in m.group(1) for t in ["click", "scroll", "purchase", "view", "event"]):
+        return m.group(1)
+    if "donation_click" in q.lower():
+        return "donation_click"
+    if "gnb_click" in q.lower():
+        return "gnb_click"
+    if "scroll" in q.lower():
+        return "scroll"
+    if "purchase" in q.lower() or "구매" in q:
+        return "purchase"
+    return ""
+
+
+def _make_followup_actionable(followup: str, base_question: str) -> str:
+    f = str(followup or "").strip()
+    base = str(base_question or "").strip()
+    if not f:
+        return ""
+    # Already actionable
+    if any(k in f for k in ["알려줘", "보여줘", "분석해줘", "나눠줘", "비교해줘", "확인해줘"]):
+        return f
+    if not base:
+        return f.replace("볼까요?", "보여줘").replace("해볼까요?", "해줘")
+
+    if "이전 기간과 비교" in f or "증감" in f:
+        return f"{base}를 이전 기간과 비교해 증감 보여줘"
+    if "채널별/디바이스별" in f:
+        return f"{base}를 채널별로 나눠줘"
+    if "채널별" in f:
+        return f"{base}를 채널별로 나눠줘"
+    if "디바이스별" in f:
+        return f"{base}를 디바이스별로 나눠줘"
+    if "소스/매체" in f:
+        return f"{base}를 소스/매체별로 보여줘"
+    if "상위 항목 TOP 10" in f or "top 10" in f.lower():
+        return f"{base}를 TOP 10으로 보여줘"
+    if "원인 분석" in f:
+        return f"{base}의 원인 분석해줘"
+
+    s = f.replace("볼까요?", "보여줘").replace("해볼까요?", "해줘").replace("드릴까요?", "보여줘")
+    return s
+
+
+def _build_actionable_followups(route: str, body: Dict[str, Any], current_question: str, last_user_question: str) -> List[str]:
+    q = str(current_question or "").strip()
+    base = str(last_user_question or current_question or "").strip()
+    sig = _intent_signature(q or base)
+    period = _extract_period_prefix(q or base)
+    rows = body.get("raw_data") if isinstance(body, dict) else []
+    row0 = rows[0] if isinstance(rows, list) and rows and isinstance(rows[0], dict) else {}
+    cols = {str(k).lower() for k in row0.keys()}
+    route_l = str(route or "").lower()
+
+    out: List[str] = []
+    seen = set()
+    def add(s: str):
+        s = re.sub(r"\s+", " ", str(s or "")).strip()
+        if not s:
+            return
+        if s in seen:
+            return
+        seen.add(s)
+        out.append(s)
+
+    if route_l == "file":
+        add(f"{base}를 컬럼별로 다시 요약해줘")
+        add("이 파일에서 결측치 상위 5개 컬럼 보여줘")
+        add("이 파일에서 카테고리별 분포를 보여줘")
+        add("이 파일에서 전주/전월 비교 가능한 지표를 찾아줘")
+        return out[:4]
+
+    has_donation_col = any("donation" in c for c in cols) or ("후원" in q)
+    evt = _infer_event_name(q or base)
+
+    if sig["revenue"]:
+        add(f"{period}구매 수익을 이전 기간과 비교해줘".strip())
+        add(f"{period}상품별 매출 TOP 10 보여줘".strip())
+        add(f"{period}매출을 채널별로 나눠줘".strip())
+        if has_donation_col:
+            add(f"{period}donation_name별 매출 보여줘".strip())
+    elif sig["user"]:
+        add(f"{period}활성 사용자 추이를 일별로 보여줘".strip())
+        add(f"{period}활성 사용자를 채널별로 나눠줘".strip())
+        add(f"{period}활성 사용자를 소스/매체별로 보여줘".strip())
+        add(f"{period}지난 기간 대비 사용자 증감 보여줘".strip())
+    elif sig["event"]:
+        if evt:
+            add(f"{period}{evt} 이벤트 수 알려줘".strip())
+            add(f"{period}{evt}를 매개변수별로 나눠줘".strip())
+        add(f"{period}이벤트 이름 TOP 10 보여줘".strip())
+        add(f"{period}이벤트를 채널별로 나눠줘".strip())
+    elif sig["channel"]:
+        add(f"{period}채널별 활성 사용자 보여줘".strip())
+        add(f"{period}소스/매체별 활성 사용자 보여줘".strip())
+        add(f"{period}채널별 구매 수익 보여줘".strip())
+        add(f"{period}채널별 전환율 보여줘".strip())
+    else:
+        add(f"{period}활성 사용자 수 알려줘".strip())
+        add(f"{period}구매 수익 알려줘".strip())
+        add(f"{period}채널별 성과 보여줘".strip())
+        add(f"{period}이벤트 TOP 10 보여줘".strip())
+    return out[:4]
+
+
 def _extract_message_from_response(resp: Any) -> str:
     try:
         if not isinstance(resp, dict):
@@ -255,11 +379,21 @@ def _normalize_followups(route: str, body: Dict[str, Any], current_question: str
 
     # 실패/불일치 응답에서는 안전한 재질문 세트로 교체
     if _is_no_data_or_no_match_response({"response": body, "route": route}):
-        return _build_reask_suggestions(last_user_question or current_question)
+        return _build_actionable_followups(
+            route=route,
+            body=body,
+            current_question=current_question,
+            last_user_question=last_user_question
+        )
 
     # 추천이 비어 있으면 현재 질문 기반 기본 추천 제공
     if not candidates:
-        return _build_reask_suggestions(current_question)
+        return _build_actionable_followups(
+            route=route,
+            body=body,
+            current_question=current_question,
+            last_user_question=last_user_question
+        )
 
     out = []
     seen = set()
@@ -270,8 +404,12 @@ def _normalize_followups(route: str, body: Dict[str, Any], current_question: str
         if re.match(r"^\s*\d+\s*번?\s*$", f):
             continue
         rewritten = _rewrite_followup_with_context(f, last_user_question or current_question)
+        rewritten = _make_followup_actionable(rewritten, last_user_question or current_question)
         s = re.sub(r"\s+", " ", rewritten).strip()
         if not s:
+            continue
+        # 모호한 재질문 문구 제거(모바일 탭형 클릭 시 품질 저하 방지)
+        if any(k in s for k in ["지표명을 포함", "기간을 함께 지정", "차원(예:"]):
             continue
         if s not in seen:
             seen.add(s)
@@ -279,8 +417,13 @@ def _normalize_followups(route: str, body: Dict[str, Any], current_question: str
 
     # 전부 제거되면 안전 기본값
     if not out:
-        out = _build_reask_suggestions(current_question)
-    return out[:5]
+        out = _build_actionable_followups(
+            route=route,
+            body=body,
+            current_question=current_question,
+            last_user_question=last_user_question
+        )
+    return out[:4]
 
 
 def _extract_response_body(resp: Any) -> Dict[str, Any]:

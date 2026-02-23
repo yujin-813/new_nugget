@@ -352,6 +352,13 @@
             margin: 3px 0;
         }
 
+        .followup-actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-top: 6px;
+        }
+
         /* Clarify Chips */
         .clarify-container {
             display: flex;
@@ -851,6 +858,20 @@
 
             .mobile-tab-btn.active {
                 color: var(--primary-color);
+            }
+
+            .followup-box {
+                padding: 12px;
+            }
+
+            .followup-actions .quick-chip {
+                width: 100%;
+                border-radius: 10px;
+                padding: 10px 12px;
+                text-align: left;
+                font-size: 13px;
+                white-space: normal;
+                line-height: 1.4;
             }
         }
 
@@ -2095,13 +2116,13 @@
             if (role === 'bot' && parsed.followups.length > 0) {
                 const followupBox = document.createElement('div');
                 followupBox.className = 'followup-box';
-                const listHtml = parsed.followups.map(item => {
+                const listHtml = parsed.followups.slice(0, isMobileViewport() ? 4 : 6).map(item => {
                     const safe = escapeHtml(item);
-                    return `<li><button type="button" class="quick-chip" style="margin:2px 0;" data-q="${safe}" onclick="setInputAndAsk(this.dataset.q)">${safe}</button></li>`;
+                    return `<button type="button" class="quick-chip" data-q="${safe}" onclick="setInputAndAsk(this.dataset.q)">${safe}</button>`;
                 }).join('');
                 followupBox.innerHTML = `
                     <div class="followup-title">다음 질문 추천</div>
-                    <ol class="followup-list">${listHtml}</ol>
+                    <div class="followup-actions">${listHtml}</div>
                 `;
                 div.appendChild(followupBox);
             }
@@ -2213,13 +2234,13 @@
             if (Array.isArray(followups) && followups.length > 0) {
                 const followupBox = document.createElement('div');
                 followupBox.className = 'followup-box';
-                const listHtml = followups.map(item => {
+                const listHtml = followups.slice(0, isMobileViewport() ? 4 : 6).map(item => {
                     const safe = escapeHtml(item);
-                    return `<li><button type="button" class="quick-chip" style="margin:2px 0;" data-q="${safe}" onclick="setInputAndAsk(this.dataset.q)">${safe}</button></li>`;
+                    return `<button type="button" class="quick-chip" data-q="${safe}" onclick="setInputAndAsk(this.dataset.q)">${safe}</button>`;
                 }).join('');
                 followupBox.innerHTML = `
                     <div class="followup-title">다음 질문 추천</div>
-                    <ol class="followup-list">${listHtml}</ol>
+                    <div class="followup-actions">${listHtml}</div>
                 `;
                 card.appendChild(followupBox);
             }
