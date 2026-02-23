@@ -238,8 +238,12 @@ def _is_expansion_request(question: str) -> bool:
 def _detect_drilldown_dimension(current_q: str, previous_q: str) -> str:
     cur = str(current_q or "").lower()
     prev = str(previous_q or "").lower()
+    if any(k in cur for k in ["캠페인", "campaign"]):
+        return "캠페인별"
     if any(k in cur for k in ["소스/매체", "source/medium", "source medium"]):
         return "소스/매체별"
+    if any(k in cur for k in ["소스", "source"]):
+        return "소스별"
     if any(k in cur for k in ["채널", "channel"]):
         return "채널별"
     if any(k in cur for k in ["디바이스", "기기", "device"]):
@@ -248,12 +252,16 @@ def _detect_drilldown_dimension(current_q: str, previous_q: str) -> str:
         return "국가별"
     if any(k in cur for k in ["상품", "카테고리", "후원명", "donation_name"]):
         return "상품별"
-    # "더 내려서/세분화"처럼 차원 미지정 확장 질의는 유입 분석 기본 드릴다운으로 처리
+    # "더 내려서/세분화"처럼 차원 미지정 확장 질의는 acquisition 계층으로 한 단계 이동
     if any(k in cur for k in ["더 내려", "세분", "드릴다운", "상세", "깊게"]):
-        if any(k in prev for k in ["유입", "소스", "경로", "트래픽"]):
-            return "소스/매체별"
         if "채널" in prev:
+            return "소스별"
+        if any(k in prev for k in ["소스별", "소스 기준", "source"]):
             return "소스/매체별"
+        if any(k in prev for k in ["소스/매체", "source/medium", "매체"]):
+            return "캠페인별"
+        if any(k in prev for k in ["유입", "경로", "트래픽"]):
+            return "채널별"
     return ""
 
 
@@ -290,6 +298,30 @@ def _merge_with_previous_query(current_q: str, previous_q: str) -> str:
         merged = f"{merged} 표(테이블)로 보여줘"
 
     return re.sub(r"\s+", " ", merged).strip()
+
+
+def _build_anchor_query_from_state(state: Dict[str, Any]) -> str:
+    if not isinstance(state, dict):
+        return ""
+    metric_label = ""
+    dim_label = ""
+    metrics = state.get("metrics") or []
+    dims = state.get("dimensions") or []
+    if isinstance(metrics, list) and metrics:
+        m_name = (metrics[0] or {}).get("name")
+        if m_name:
+            metric_label = GA4_METRICS.get(m_name, {}).get("ui_name") or str(m_name)
+    if isinstance(dims, list) and dims:
+        d_name = (dims[0] or {}).get("name")
+        if d_name:
+            dim_label = GA4_DIMENSIONS.get(d_name, {}).get("ui_name") or str(d_name)
+    if metric_label and dim_label:
+        return f"{dim_label}별 {metric_label}"
+    if metric_label:
+        return metric_label
+    if dim_label:
+        return f"{dim_label} 기준 분석"
+    return ""
 
 
 def _ensure_compare_output_structure(body: Dict[str, Any], question: str) -> Dict[str, Any]:
@@ -1838,6 +1870,7 @@ def ensure_new_conversation():
         "last_followup_suggestions",
         "last_user_question",
         "last_response",
+        "current_analysis_state",
     ]:
         session.pop(key, None)
     
@@ -2681,6 +2714,11 @@ def ask_question():
         data = request.get_json()
         original_question = (data.get('question') or "").strip()
         prev_user_q = str(session.get("last_user_question") or "")
+        if not prev_user_q:
+            current_state = session.get("current_analysis_state")
+            ql_tmp = (original_question or "").lower()
+            if _is_expansion_request(original_question) or any(k in ql_tmp for k in ["원인", "이유", "왜", "더 내려", "세분", "드릴다운"]):
+                prev_user_q = _build_anchor_query_from_state(current_state)
         question = _merge_with_previous_query(original_question, prev_user_q)
         question = _normalize_summary_request(question)
         beginner_mode = bool(data.get("beginner_mode", False))
@@ -2988,6 +3026,18 @@ def ask_question():
 
         # [P0] Session Save
         session['last_response'] = response
+
+        # 현재 분석 상태(JSON) 세션 유지: 확장/드릴다운 판단의 기준으로 사용
+        try:
+            route_now = ""
+            if isinstance(response, dict):
+                route_now = str(response.get("route") or "").lower()
+            if route_now in {"ga4", "ga4_followup"} and conversation_id:
+                current_state = DBManager.load_last_state(conversation_id, source="ga4")
+                if isinstance(current_state, dict):
+                    session["current_analysis_state"] = current_state
+        except Exception as _e:
+            app.logger.warning(f"Failed to cache current analysis state in session: {_e}")
 
         # 후속 질문 추천 세션 저장
         followups = []

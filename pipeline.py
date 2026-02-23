@@ -76,9 +76,9 @@ def _has_data_signal(question: str) -> bool:
 def _default_dimension_for_question(question: str) -> Optional[str]:
     q = (question or "").lower()
     if any(t in q for t in ["소스", "매체", "source", "medium", "유입", "경로", "트래픽"]):
-        return "sessionSourceMedium"
+        return "sourceMedium"
     if "채널" in q:
-        return "sessionDefaultChannelGroup"
+        return "defaultChannelGroup"
     if any(t in q for t in ["상품", "카테고리", "후원명", "donation_name"]):
         return "itemName"
     if any(t in q for t in ["국가", "country"]):
@@ -234,8 +234,9 @@ class GA4Pipeline:
                 # 차원 힌트가 없으면 유입 분석 기본 차원 후보를 채운다
                 if not dimension_candidates:
                     dimension_candidates = [
-                        {"name": "sessionDefaultChannelGroup", "score": 0.90, "matched_by": "pipeline_abstract_default", "scope": "session"},
-                        {"name": "sessionSourceMedium", "score": 0.86, "matched_by": "pipeline_abstract_default", "scope": "session"},
+                        {"name": "defaultChannelGroup", "score": 0.90, "matched_by": "pipeline_abstract_default", "scope": "event"},
+                        {"name": "source", "score": 0.88, "matched_by": "pipeline_abstract_default", "scope": "event"},
+                        {"name": "sourceMedium", "score": 0.86, "matched_by": "pipeline_abstract_default", "scope": "event"},
                     ]
                 # 메트릭은 총합만 주지 않도록 최소 활성사용자 + 세션 후보
                 if not metric_candidates:
@@ -283,6 +284,31 @@ class GA4Pipeline:
                         "matching_debug": matching_debug
                     }
 
+            # 지난주 vs 전주 비교는 자동으로 동일 길이 직전 구간까지 포함
+            if ("지난주" in q and ("전주" in q or "그 전주" in q)) and not (date_range or {}).get("is_relative_shift"):
+                try:
+                    from datetime import date as _date, timedelta as _td
+                    today = _date.today()
+                    this_monday = today - _td(days=today.weekday())
+                    cur_start = this_monday - _td(days=7)  # 지난주 월요일
+                    cur_end = cur_start + _td(days=6)
+                    prev_start = cur_start - _td(days=7)
+                    prev_end = cur_end - _td(days=7)
+                    date_range["start_date"] = prev_start.strftime("%Y-%m-%d")
+                    date_range["end_date"] = cur_end.strftime("%Y-%m-%d")
+                    date_range["compare_windows"] = [
+                        {"label": "prev_week", "start_date": prev_start.strftime("%Y-%m-%d"), "end_date": prev_end.strftime("%Y-%m-%d")},
+                        {"label": "last_week", "start_date": cur_start.strftime("%Y-%m-%d"), "end_date": cur_end.strftime("%Y-%m-%d")}
+                    ]
+                    intent = "comparison"
+                    modifiers["needs_breakdown"] = True
+                    modifiers["needs_total"] = False
+                    # dimension 미지정 비교도 총합 비교가 가능하도록 week를 기본 축으로 사용
+                    if not dimension_candidates:
+                        dimension_candidates = [{"name": "week", "score": 0.92, "matched_by": "pipeline_auto_week_compare", "scope": "event"}]
+                except Exception as _e:
+                    logging.warning(f"[Pipeline] auto previous-week compare setup failed: {_e}")
+
             # 매칭 실패 시 무리한 기본 지표 추론 대신 명시적으로 질의 보강 요청
             top_score = metric_candidates[0].get("score", 0) if metric_candidates else 0
             has_prev_metrics = bool(last_state and last_state.get("metrics"))
@@ -307,7 +333,7 @@ class GA4Pipeline:
                     # 추상 분석 질의는 clarify로 빠지지 않게 차원 중심 기본 쿼리를 강제
                     metric_candidates = [{"name": "activeUsers", "score": 0.72, "matched_by": "pipeline_abstract_recover", "scope": "event"}]
                     if not dimension_candidates:
-                        dimension_candidates = [{"name": "sessionDefaultChannelGroup", "score": 0.72, "matched_by": "pipeline_abstract_recover", "scope": "session"}]
+                        dimension_candidates = [{"name": "defaultChannelGroup", "score": 0.72, "matched_by": "pipeline_abstract_recover", "scope": "event"}]
                     intent = "breakdown"
                     modifiers["needs_breakdown"] = True
                     modifiers["needs_total"] = False
@@ -326,7 +352,7 @@ class GA4Pipeline:
                     metric_candidates = [fallback_metric]
                     fallback_dim = _default_dimension_for_question(question)
                     if fallback_dim:
-                        dim_scope = "session" if fallback_dim in ["sessionSourceMedium", "sessionDefaultChannelGroup"] else "event"
+                        dim_scope = "event"
                         dimension_candidates = [{
                             "name": fallback_dim,
                             "score": 0.70,

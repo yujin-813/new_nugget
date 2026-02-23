@@ -206,7 +206,7 @@ def _extract_plot_data(blocks: List[Dict[str, Any]], question: str = "") -> Dict
     def _pick_label_key(keys: List[str], sample: Dict[str, Any]) -> str:
         preferred = []
         if any(k in q for k in ["채널", "source", "매체", "경로", "유입"]):
-            preferred += ["sessionDefaultChannelGroup", "sessionSourceMedium", "firstUserSourceMedium"]
+            preferred += ["defaultChannelGroup", "source", "sourceMedium", "sessionDefaultChannelGroup", "sessionSourceMedium", "firstUserSourceMedium"]
         if any(k in q for k in ["후원", "donation", "프로그램"]):
             preferred += ["customEvent:donation_name", "itemName", "itemCategory"]
         if any(k in q for k in ["이벤트", "event", "클릭"]):

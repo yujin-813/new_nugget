@@ -1565,7 +1565,7 @@ def is_followup_question(question: str) -> bool:
     # 1) 강한 followup 트리거 (이건 무조건 followup)
     strong_followup = [
         "아까", "방금", "이전", "전 내용", "전꺼", "그거", "이거",
-        "다시", "재설명", "더 자세히", "왜", "원인"
+        "다시", "재설명", "더 자세히"
     ]
     if any(k in q for k in strong_followup):
         return True

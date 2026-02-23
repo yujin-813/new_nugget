@@ -115,6 +115,40 @@ class GA4Planner:
         logging.info(f"[Planner] Building plan for intent={intent}")
         modifiers = dict(modifiers or {})
 
+        # 원인 분석은 현재 컨텍스트 유지(지표/차원 유지 + breakdown)
+        if modifiers.get("cause_analysis_mode") and last_state:
+            intent = "breakdown"
+            modifiers["needs_breakdown"] = True
+            modifiers["needs_total"] = False
+            if not metric_candidates and isinstance(last_state.get("metrics"), list):
+                metric_candidates = []
+                for m in (last_state.get("metrics") or []):
+                    m_name = (m or {}).get("name")
+                    if not m_name:
+                        continue
+                    metric_candidates.append({
+                        "name": m_name,
+                        "score": 0.97,
+                        "matched_by": "cause_analysis_state",
+                        "scope": self._metric_scope(m_name),
+                        "priority": GA4_METRICS.get(m_name, {}).get("priority", 0),
+                    })
+            if not dimension_candidates and isinstance(last_state.get("dimensions"), list):
+                dimension_candidates = []
+                for d in (last_state.get("dimensions") or []):
+                    d_name = (d or {}).get("name")
+                    if not d_name:
+                        continue
+                    dim_meta = GA4_DIMENSIONS.get(d_name, {})
+                    dimension_candidates.append({
+                        "name": d_name,
+                        "score": 0.97,
+                        "matched_by": "cause_analysis_state",
+                        "scope": dim_meta.get("scope") or self.CATEGORY_TO_SCOPE.get(dim_meta.get("category"), "event"),
+                        "category": dim_meta.get("category"),
+                        "priority": dim_meta.get("priority", 0),
+                    })
+
         # "전체 항목" 후속질문은 직전 breakdown 맥락을 강제 재사용
         if modifiers.get("all_items") and last_state and last_state.get("dimensions"):
             intent = "breakdown"

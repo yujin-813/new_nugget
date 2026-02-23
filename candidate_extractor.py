@@ -205,6 +205,22 @@ class DateParser:
     def parse(question, last_state=None, date_context=None):
         delta_dates = {"start_date": None, "end_date": None, "is_relative_shift": False}
         q = question.lower()
+
+        # 0) 지난주 vs 전주 자동 기간 계산 (동일 길이 직전 구간 포함)
+        if "지난주" in q and ("전주" in q or "그 전주" in q):
+            today = date.today()
+            this_monday = today - timedelta(days=today.weekday())
+            last_week_start = this_monday - timedelta(days=7)
+            last_week_end = last_week_start + timedelta(days=6)
+            prev_week_start = last_week_start - timedelta(days=7)
+            prev_week_end = last_week_end - timedelta(days=7)
+            delta_dates["start_date"] = prev_week_start.strftime("%Y-%m-%d")
+            delta_dates["end_date"] = last_week_end.strftime("%Y-%m-%d")
+            delta_dates["compare_windows"] = [
+                {"label": "prev_week", "start_date": prev_week_start.strftime("%Y-%m-%d"), "end_date": prev_week_end.strftime("%Y-%m-%d")},
+                {"label": "last_week", "start_date": last_week_start.strftime("%Y-%m-%d"), "end_date": last_week_end.strftime("%Y-%m-%d")},
+            ]
+            return delta_dates
         
         # 1. Relative Shift
         if date_context and ("그 전주" in q or ("전주" in q and "지난주" not in q and "이번주" not in q)):
@@ -299,6 +315,8 @@ class IntentClassifier:
     @staticmethod
     def classify(question: str) -> str:
         q = question.lower()
+        if ("지난주" in q and ("그 전주" in q or "전주" in q)):
+            return "comparison"
         if ("지난주" in q and ("그 전주" in q or "전주" in q)) and any(k in q for k in ["사용자", "유저", "세션"]):
             return "comparison"
         
@@ -1746,6 +1764,15 @@ class ModifierExtractor:
             modifiers["force_dimensions"] = ["date"]
             modifiers["force_metrics"] = ["activeUsers"]
 
+        # 지난주 vs 전주: dimension 없어도 비교 가능하도록 week 축 자동 부여
+        if ("지난주" in q and ("그 전주" in q or "전주" in q)):
+            modifiers["needs_breakdown"] = True
+            modifiers["needs_total"] = False
+            modifiers["scope_hint"] = ["event"]
+            if "force_dimensions" not in modifiers:
+                modifiers["force_dimensions"] = ["week"]
+            modifiers["auto_prev_period_compare"] = True
+
         # 추이 질문은 기본적으로 일별(date) 차원 강제
         if any(k in q for k in ["추이", "흐름", "일별", "변화"]) and "force_dimensions" not in modifiers:
             modifiers["needs_trend"] = True
@@ -2238,17 +2265,26 @@ class ModifierExtractor:
 
 def _is_drilldown_followup(question: str) -> bool:
     q = (question or "").lower()
-    tokens = ["더 내려", "세분", "드릴다운", "상세", "깊게", "나눠서", "기준으로"]
+    tokens = ["더 내려", "세분", "드릴다운", "상세", "깊게", "나눠서", "기준으로", "원인", "이유", "왜"]
     dim_tokens = ["채널", "소스", "매체", "경로", "국가", "디바이스", "상품", "카테고리", "후원명", "donation_name"]
     return any(t in q for t in tokens) or any(t in q for t in dim_tokens)
 
 
 def _infer_drilldown_dimension(question: str, last_state: Optional[Dict]) -> Optional[str]:
     q = (question or "").lower()
-    if any(k in q for k in ["소스/매체", "source/medium", "소스", "매체", "경로", "유입"]):
-        return "sessionSourceMedium"
+    if any(k in q for k in ["소스/매체", "source/medium"]):
+        return "sourceMedium"
+    if any(k in q for k in ["소스", "source"]):
+        return "source"
+    if any(k in q for k in ["매체", "medium", "경로", "유입"]):
+        return "sourceMedium"
     if "채널" in q:
-        return "sessionDefaultChannelGroup"
+        return "defaultChannelGroup"
+    if any(k in q for k in ["캠페인", "campaign"]):
+        for cand in ["campaignName", "sessionCampaignName", "firstUserCampaignName", "customEvent:campaign_name"]:
+            if cand in GA4_DIMENSIONS:
+                return cand
+        return "sourceMedium"
     if any(k in q for k in ["국가", "country"]):
         return "country"
     if any(k in q for k in ["디바이스", "기기", "device"]):
@@ -2257,13 +2293,30 @@ def _infer_drilldown_dimension(question: str, last_state: Optional[Dict]) -> Opt
         return "itemName"
     if any(k in q for k in ["후원명", "donation_name"]):
         return "customEvent:donation_name"
-    # 차원 미지정 드릴다운은 이전 차원에서 한 단계 세분화
+    # 차원 미지정 드릴다운은 acquisition 계층(channel→source→source/medium→campaign)로 이동
     if last_state and isinstance(last_state.get("dimensions"), list) and last_state.get("dimensions"):
         prev_dim = (last_state["dimensions"][0] or {}).get("name")
-        if prev_dim in ["sessionDefaultChannelGroup", "defaultChannelGroup"]:
-            return "sessionSourceMedium"
-        if prev_dim in ["sessionSource", "source", "sessionSourceMedium"]:
-            return "sessionSourceMedium"
+        if any(k in q for k in ["더 내려", "세분", "드릴다운", "상세", "깊게"]):
+            campaign_dim = None
+            for cand in ["campaignName", "sessionCampaignName", "firstUserCampaignName", "customEvent:campaign_name"]:
+                if cand in GA4_DIMENSIONS:
+                    campaign_dim = cand
+                    break
+            hierarchy = ["defaultChannelGroup", "source", "sourceMedium"] + ([campaign_dim] if campaign_dim else [])
+            alias = {
+                "sessionDefaultChannelGroup": "defaultChannelGroup",
+                "sessionSource": "source",
+                "sessionSourceMedium": "sourceMedium",
+            }
+            normalized_prev = alias.get(prev_dim, prev_dim)
+            if normalized_prev in hierarchy:
+                idx = hierarchy.index(normalized_prev)
+                if idx + 1 < len(hierarchy):
+                    return hierarchy[idx + 1]
+            if normalized_prev == "defaultChannelGroup":
+                return "source"
+            if normalized_prev in ["source", "sourceMedium"]:
+                return "sourceMedium"
     return None
 
 
@@ -2458,6 +2511,7 @@ class CandidateExtractor:
             modifiers["needs_breakdown"] = True
             modifiers["needs_total"] = False
             modifiers["inherit_last_filters"] = True
+            modifiers["preserve_context"] = True
             drill_dim = _infer_drilldown_dimension(question, last_state)
             if drill_dim:
                 modifiers["force_dimensions"] = [drill_dim]
@@ -2472,6 +2526,36 @@ class CandidateExtractor:
                     "priority": dim_meta.get("priority", 0),
                 }]
                 intent = "breakdown"
+
+            # 원인 분석은 현재 metric/dimension을 유지하고 분해만 추가
+            if any(k in question.lower() for k in ["원인", "이유", "왜", "해석"]):
+                intent = "breakdown"
+                modifiers["cause_analysis_mode"] = True
+                if not dimension_candidates and isinstance(last_state.get("dimensions"), list):
+                    for d in (last_state.get("dimensions") or []):
+                        d_name = (d or {}).get("name")
+                        if not d_name:
+                            continue
+                        dim_meta = GA4_DIMENSIONS.get(d_name, {})
+                        dimension_candidates.append({
+                            "name": d_name,
+                            "score": 0.96,
+                            "matched_by": "cause_analysis_context",
+                            "scope": dim_meta.get("scope") or "event",
+                            "category": dim_meta.get("category"),
+                            "priority": dim_meta.get("priority", 0),
+                        })
+                # 이전 차원이 없으면 최소 breakdown 차원 추가
+                if not dimension_candidates:
+                    fallback_dim = "defaultChannelGroup" if "defaultChannelGroup" in GA4_DIMENSIONS else "sourceMedium"
+                    dimension_candidates = [{
+                        "name": fallback_dim,
+                        "score": 0.84,
+                        "matched_by": "cause_analysis_fallback",
+                        "scope": "event",
+                        "category": "traffic",
+                        "priority": GA4_DIMENSIONS.get(fallback_dim, {}).get("priority", 0),
+                    }]
 
             if not metric_candidates and isinstance(last_state.get("metrics"), list):
                 for m in last_state.get("metrics", []):
