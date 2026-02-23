@@ -193,6 +193,24 @@ def _build_reask_suggestions(question: str) -> List[str]:
     return ["지표명을 포함해 다시 질문해 주세요.", "기간을 함께 지정해볼까요?", "차원(예: 채널/상품)도 함께 지정해볼까요?"]
 
 
+def _build_contextual_clarify_message(question: str) -> str:
+    sig = _intent_signature(question)
+    if sig["channel"]:
+        examples = "`지난주 채널별 활성 사용자` , `소스/매체별 사용자` , `채널별 구매 수익`"
+    elif sig["revenue"]:
+        examples = "`지난주 구매 수익` , `상품별 매출 TOP 10` , `채널별 매출`"
+    elif sig["user"]:
+        examples = "`지난주 활성 사용자 수` , `사용자 추이(일별)` , `채널별 사용자 수`"
+    elif sig["event"]:
+        examples = "`지난주 이벤트 TOP 10` , `특정 이벤트 클릭 수` , `이벤트를 채널별로`"
+    else:
+        examples = "`지난주 요약` , `채널별 사용자 수` , `상품별 매출 TOP 10`"
+    return (
+        "질문을 이해했지만 현재 응답 후보와 의도가 조금 어긋났어요.\n"
+        f"아래처럼 한 번만 지정해 주시면 바로 분석할게요: {examples}"
+    )
+
+
 def _extract_period_prefix(text: str) -> str:
     q = str(text or "").lower()
     if "지난주" in q:
@@ -372,6 +390,9 @@ def _rewrite_ga_question_for_retry(question: str) -> str:
         return f"{period}채널별 활성 사용자와 채널별 구매 수익을 요약해줘".strip()
     if is_summary:
         return f"{period}활성 사용자 수, 구매 수익, 이벤트 TOP 10을 요약해줘".strip()
+
+    if any(k in lq for k in ["유입", "경로", "트래픽"]) and any(k in lq for k in ["분석", "알려", "보여"]):
+        return f"{period}채널별 활성 사용자와 소스/매체별 활성 사용자 보여줘".strip()
 
     if "사용자" in lq and any(k in lq for k in ["추이", "트렌드", "흐름"]):
         return f"{period}활성 사용자 추이 알려줘".strip()
@@ -600,6 +621,10 @@ def _apply_bad_regression_guard(user_id: str, question: str, response: Any) -> A
     # 채널+사용자 질문은 대개 집계 축 문제라 과도한 차단 방지
     if qsig["channel"] and qsig["user"]:
         mismatch = False
+    # "유입 분석" 같이 넓은 탐색 질문은 차단보다 자동 재해석을 우선
+    lq = (question or "").lower()
+    if any(k in lq for k in ["유입", "경로", "트래픽"]) and any(k in lq for k in ["분석", "알려", "보여"]):
+        mismatch = False
     if qsig["trend"] and ("기준 기간은" in message and "추이" not in message):
         mismatch = True
 
@@ -618,10 +643,7 @@ def _apply_bad_regression_guard(user_id: str, question: str, response: Any) -> A
     if len(bad_questions) < 5 and max_sim < 0.25:
         return response
 
-    safe_msg = (
-        "질문 의도(지표/차원)와 현재 응답 후보가 어긋날 가능성이 있어 다시 확인이 필요합니다.\n"
-        "원하시는 기준을 한 번만 더 지정해 주세요. 예: `매출 + 채널별`, `donation_click + donation_name`, `지난주 + 사용자 추이`"
-    )
+    safe_msg = _build_contextual_clarify_message(question)
     body["message"] = safe_msg
     body["status"] = "clarify"
     body["plot_data"] = []
