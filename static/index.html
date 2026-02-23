@@ -673,7 +673,7 @@
             cursor: pointer;
         }
 
-        @media (max-width: 768px) {
+        @media (max-width: 1024px) {
             body {
                 overflow: auto;
                 height: auto;
@@ -711,16 +711,16 @@
             }
 
             .sidebar {
-                width: 100%;
+                width: 100% !important;
                 min-width: 0;
                 border-right: none;
                 border-bottom: 1px solid var(--border-color);
-                max-height: 38vh;
+                max-height: 34vh;
             }
 
             .chat-main {
-                width: 100%;
-                min-height: 56vh;
+                width: 100% !important;
+                min-height: 58vh;
                 border-right: none;
             }
 
@@ -765,6 +765,18 @@
 
             .report-panel:not(.collapsed) {
                 transform: translateY(0);
+            }
+
+            .message {
+                max-width: 100%;
+            }
+
+            .input-area {
+                padding: 12px;
+            }
+
+            .input-wrapper {
+                max-width: 100%;
             }
         }
 
@@ -1329,6 +1341,7 @@
             updateOnboardingState();
             renderOnboardingInsights();
             refreshReportSnapshotCard();
+            syncResponsiveLayoutMetrics();
 
             const panel = document.getElementById('report-panel');
             panel.classList.add('collapsed');
@@ -1355,6 +1368,14 @@
                 setTimeout(() => openConnectModal(), 120);
             }
         });
+
+        function syncResponsiveLayoutMetrics() {
+            const nav = document.querySelector('.navbar');
+            if (!nav) return;
+            const navHeight = Math.max(60, nav.offsetHeight || 60);
+            document.documentElement.style.setProperty('--navbar-height', `${navHeight}px`);
+        }
+        window.addEventListener('resize', syncResponsiveLayoutMetrics);
 
 
 
