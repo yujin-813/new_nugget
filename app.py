@@ -381,6 +381,50 @@ def _rewrite_ga_question_for_retry(question: str) -> str:
     return q
 
 
+def _build_ga_retry_candidates(question: str) -> List[str]:
+    q = str(question or "").strip()
+    lq = q.lower()
+    period = _extract_period_prefix(q)
+    sig = _intent_signature(q)
+    out: List[str] = []
+
+    def _add(x: str):
+        s = str(x or "").strip()
+        if not s:
+            return
+        if s not in out:
+            out.append(s)
+
+    # 1) 기본 정규화 후보
+    _add(_rewrite_ga_question_for_retry(q))
+
+    # 2) 의도별 후보 확장
+    if sig["channel"] and sig["user"]:
+        _add(f"{period}채널별 활성 사용자 수 보여줘".strip())
+    if sig["channel"] and sig["revenue"]:
+        _add(f"{period}채널별 구매 수익 보여줘".strip())
+    if sig["event"] and "donation_click" in lq:
+        _add(f"{period}donation_click 이벤트 수 알려줘".strip())
+        _add(f"{period}donation_click의 donation_name별 이벤트 수 보여줘".strip())
+    if "donation_name" in lq or "후원명" in lq:
+        if "purchase" in lq or "구매" in lq:
+            _add(f"{period}purchase 이벤트의 donation_name별 이벤트 수 보여줘".strip())
+        else:
+            _add(f"{period}donation_name별 이벤트 수 보여줘".strip())
+    if "전환율" in lq:
+        _add(f"{period}donation_click 대비 purchase 전환율 알려줘".strip())
+    if _is_summary_request(q):
+        _add(f"{period}활성 사용자 수, 구매 수익, 이벤트 TOP 10을 요약해줘".strip())
+
+    # 3) 라우팅 강제 힌트 후보
+    base = list(out)
+    for c in base:
+        _add(f"ga4에서 {c}")
+
+    # 원문과 동일한 것은 제외
+    return [c for c in out if c and c != q][:8]
+
+
 def _normalize_summary_request(question: str) -> str:
     q = str(question or "").strip()
     lq = q.lower()
@@ -2177,11 +2221,11 @@ def ask_question():
                 if not _is_no_data_or_no_match_response(response2):
                     response = response2
 
-        # GA 질문에서 미스매치/무응답일 때 표준 표현으로 1회 자동 재시도
+        # GA 질문에서 미스매치/무응답일 때 의도 기반 다중 후보로 자동 재시도
         if _is_ga_no_match_response(response):
-            ga_retry_q = _rewrite_ga_question_for_retry(question)
-            if ga_retry_q and ga_retry_q != question:
-                logging.info(f"[Ask] GA retry with normalized question: {question} -> {ga_retry_q}")
+            retry_candidates = _build_ga_retry_candidates(question)
+            for ga_retry_q in retry_candidates:
+                logging.info(f"[Ask] GA retry candidate: {question} -> {ga_retry_q}")
                 response2 = handle_question(
                     ga_retry_q,
                     property_id=property_id,
@@ -2193,47 +2237,49 @@ def ask_question():
                 )
                 if not _is_ga_no_match_response(response2):
                     response = response2
-                # 요약 질문인데 여전히 실패하면 핵심 KPI 질의를 분해 실행해서 합성 응답
-                elif _is_summary_request(question):
-                    period = _extract_period_prefix(question)
-                    summary_queries = [
-                        f"{period}활성 사용자 수 알려줘".strip(),
-                        f"{period}구매 수익 알려줘".strip(),
-                        f"{period}이벤트 TOP 10 보여줘".strip(),
-                    ]
-                    summary_parts = []
-                    for sq in summary_queries:
-                        try:
-                            sr = handle_question(
-                                sq,
-                                property_id=property_id,
-                                file_path=file_path,
-                                user_id=user_id,
-                                conversation_id=conversation_id,
-                                semantic=semantic,
-                                beginner_mode=bool(session.get("beginner_mode", False))
-                            )
-                            if _is_ga_no_match_response(sr):
-                                continue
-                            sb = sr.get("response") if isinstance(sr, dict) and isinstance(sr.get("response"), dict) else sr
-                            smsg = str((sb or {}).get("message", "")).strip() if isinstance(sb, dict) else ""
-                            if smsg:
-                                summary_parts.append(smsg.splitlines()[0])
-                        except Exception:
+                    break
+
+            # 요약 질문인데 여전히 실패하면 핵심 KPI 질의를 분해 실행해서 합성 응답
+            if _is_ga_no_match_response(response) and _is_summary_request(question):
+                period = _extract_period_prefix(question)
+                summary_queries = [
+                    f"{period}활성 사용자 수 알려줘".strip(),
+                    f"{period}구매 수익 알려줘".strip(),
+                    f"{period}이벤트 TOP 10 보여줘".strip(),
+                ]
+                summary_parts = []
+                for sq in summary_queries:
+                    try:
+                        sr = handle_question(
+                            sq,
+                            property_id=property_id,
+                            file_path=file_path,
+                            user_id=user_id,
+                            conversation_id=conversation_id,
+                            semantic=semantic,
+                            beginner_mode=bool(session.get("beginner_mode", False))
+                        )
+                        if _is_ga_no_match_response(sr):
                             continue
-                    if summary_parts:
-                        response = {
-                            "route": "ga4",
-                            "response": {
-                                "message": "지난주 요약입니다.\n- " + "\n- ".join(summary_parts[:3]),
-                                "plot_data": [],
-                                "followup_suggestions": [
-                                    "지난주 요약을 채널별로 나눠서 보여줘",
-                                    "지난주 사용자 추이를 일별로 보여줘",
-                                    "지난주 매출 상위 항목 TOP 10 보여줘"
-                                ]
-                            }
+                        sb = sr.get("response") if isinstance(sr, dict) and isinstance(sr.get("response"), dict) else sr
+                        smsg = str((sb or {}).get("message", "")).strip() if isinstance(sb, dict) else ""
+                        if smsg:
+                            summary_parts.append(smsg.splitlines()[0])
+                    except Exception:
+                        continue
+                if summary_parts:
+                    response = {
+                        "route": "ga4",
+                        "response": {
+                            "message": "지난주 요약입니다.\n- " + "\n- ".join(summary_parts[:3]),
+                            "plot_data": [],
+                            "followup_suggestions": [
+                                "지난주 요약을 채널별로 나눠서 보여줘",
+                                "지난주 사용자 추이를 일별로 보여줘",
+                                "지난주 매출 상위 항목 TOP 10 보여줘"
+                            ]
                         }
+                    }
 
         response = _apply_bad_regression_guard(user_id=user_id, question=question, response=response)
         # guardrail이 과개입해 확인 질문으로 끝난 경우, 실행 가능한 표준 질의로 1회 자동 보정
@@ -2257,6 +2303,17 @@ def ask_question():
                         response = response2
         except Exception as e:
             logging.warning(f"[Ask] guardrail clarify retry skipped: {e}")
+
+        # 마지막 안전망: 일반 대화는 분석 실패 문구 대신 친절 응답으로 전환
+        if _is_no_data_or_no_match_response(response) and _is_general_chat_text(question):
+            response = {
+                "route": "system",
+                "response": {
+                    "message": "질문을 이해했어요. 데이터 질문이 아니면 간단히 답변하고, 데이터 질문이면 의도에 맞게 분석해서 알려드릴게요.\n원하시면 지금 바로 분석도 시작할게요: `지난주 요약`, `채널별 사용자 수`, `상품별 매출 TOP 10`",
+                    "plot_data": [],
+                    "followup_suggestions": ["지난주 요약 알려줘", "채널별 사용자 수 알려줘", "상품별 매출 TOP 10 보여줘"]
+                }
+            }
 
         
         logging.info(f"[Ask] Response Keys: {response.keys() if isinstance(response, dict) else 'Not Dict'}")
