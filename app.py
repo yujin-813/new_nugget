@@ -241,6 +241,8 @@ def _analysis_type_from_question(question: str) -> str:
 
 def _period_symbol_from_question(question: str) -> str:
     q = (question or "").lower()
+    if any(k in q for k in ["최근 7일", "최근7일", "최근 일주일", "last 7 days"]):
+        return "last_7d"
     if "지난주" in q:
         return "last_week"
     if "이번주" in q or "이번 주" in q:
@@ -258,7 +260,10 @@ def _period_symbol_from_question(question: str) -> str:
 
 def _period_symbol_to_range(symbol: str) -> Tuple[str, str]:
     today = date.today()
-    if symbol == "today":
+    if symbol == "last_7d":
+        s = today - timedelta(days=6)
+        e = today
+    elif symbol == "today":
         s = e = today
     elif symbol == "yesterday":
         s = e = today - timedelta(days=1)
@@ -276,7 +281,7 @@ def _period_symbol_to_range(symbol: str) -> Tuple[str, str]:
         s = today.replace(day=1)
         e = today
     else:
-        s = today - timedelta(days=7)
+        s = today - timedelta(days=6)
         e = today
     return s.strftime("%Y-%m-%d"), e.strftime("%Y-%m-%d")
 
@@ -296,6 +301,9 @@ def _previous_period_range(current_range: str) -> str:
 
 def _analysis_dimension_modifier(question: str) -> str:
     q = (question or "").lower()
+    if any(k in q for k in ["키워드", "keyword", "검색어"]):
+        # metadata에 keyword 계열 차원이 없을 수 있어 symbolic 키를 먼저 반환
+        return "keyword"
     if any(k in q for k in ["캠페인", "campaign"]):
         return "campaign"
     if any(k in q for k in ["소스/매체", "source/medium"]):
@@ -311,15 +319,67 @@ def _analysis_dimension_modifier(question: str) -> str:
     return ""
 
 
-def _acquisition_hierarchy() -> List[str]:
-    campaign_dim = ""
+def _campaign_dimension_name() -> str:
     for cand in ["campaignName", "sessionCampaignName", "firstUserCampaignName", "customEvent:campaign_name"]:
         if cand in GA4_DIMENSIONS:
-            campaign_dim = cand
-            break
-    hierarchy = ["defaultChannelGroup", "source", "sourceMedium"]
+            return cand
+    return ""
+
+
+def _keyword_dimension_name() -> str:
+    # GA4 표준/커스텀 키워드 계열 후보들
+    for cand in [
+        "keyword", "searchTerm", "sessionManualTerm", "firstUserManualTerm", "manualTerm",
+        "customEvent:keyword", "customEvent:search_term"
+    ]:
+        if cand in GA4_DIMENSIONS:
+            return cand
+    return ""
+
+
+# Drill-down hierarchy (canonical)
+DIMENSION_HIERARCHY: Dict[str, str] = {
+    "channel": "source",
+    "source": "campaign",
+    "campaign": "keyword",
+}
+
+
+def _canonical_acquisition_dim(dim_name: str) -> str:
+    d = str(dim_name or "")
+    if d in {"defaultChannelGroup", "sessionDefaultChannelGroup"}:
+        return "channel"
+    if d in {"source", "sessionSource", "sourceMedium", "sessionSourceMedium"}:
+        return "source"
+    if d in {"campaign", "campaignName", "sessionCampaignName", "firstUserCampaignName", "customEvent:campaign_name"}:
+        return "campaign"
+    if d in {"keyword", "searchTerm", "sessionManualTerm", "firstUserManualTerm", "manualTerm", "customEvent:keyword", "customEvent:search_term"}:
+        return "keyword"
+    return ""
+
+
+def _dimension_from_canonical(canonical: str) -> str:
+    c = str(canonical or "")
+    if c == "channel":
+        return "defaultChannelGroup"
+    if c == "source":
+        return "source"
+    if c == "campaign":
+        return _campaign_dimension_name() or "source"
+    if c == "keyword":
+        # keyword 차원이 없으면 campaign까지로 제한
+        return _keyword_dimension_name() or (_campaign_dimension_name() or "source")
+    return "defaultChannelGroup"
+
+
+def _acquisition_hierarchy() -> List[str]:
+    hierarchy = ["defaultChannelGroup", "source"]
+    campaign_dim = _campaign_dimension_name()
     if campaign_dim:
         hierarchy.append(campaign_dim)
+    keyword_dim = _keyword_dimension_name()
+    if keyword_dim:
+        hierarchy.append(keyword_dim)
     return hierarchy
 
 
@@ -327,18 +387,14 @@ def _next_acquisition_dimension(current_dim: str) -> str:
     hierarchy = _acquisition_hierarchy()
     if not current_dim:
         return hierarchy[0]
-    alias = {
-        "sessionDefaultChannelGroup": "defaultChannelGroup",
-        "sessionSource": "source",
-        "sessionSourceMedium": "sourceMedium",
-    }
-    cur = alias.get(current_dim, current_dim)
-    if cur in hierarchy:
-        idx = hierarchy.index(cur)
-        if idx + 1 < len(hierarchy):
-            return hierarchy[idx + 1]
-        return hierarchy[-1]
-    return hierarchy[0]
+
+    canonical = _canonical_acquisition_dim(current_dim)
+    if not canonical:
+        return hierarchy[0]
+    next_canonical = DIMENSION_HIERARCHY.get(canonical)
+    if not next_canonical:
+        return _dimension_from_canonical(canonical)
+    return _dimension_from_canonical(next_canonical)
 
 
 def _metric_defaults_for_analysis(analysis_type: str) -> List[str]:
@@ -439,7 +495,7 @@ def _parse_state_delta(question: str) -> Dict[str, Any]:
     q = (question or "").strip()
     ql = q.lower()
     compare = any(k in ql for k in ["비교", "대비", "증감", "증감률", "전주", "전월", "vs"])
-    drilldown = any(k in ql for k in ["더 내려", "세분", "드릴다운", "상세", "깊게"])
+    drilldown = any(k in ql for k in ["더 내려", "세분", "드릴다운", "drill down", "drilldown", "상세", "깊게"])
     cause = any(k in ql for k in ["원인", "이유", "왜", "해석"])
     metric_overrides = _metric_overrides_from_question(q)
     return {
@@ -495,7 +551,9 @@ def _merge_analysis_state(current_state: Dict[str, Any], delta: Dict[str, Any]) 
         if st["analysis_type"] == "acquisition" and requested_dim in {"defaultChannelGroup", "source", "sourceMedium"}:
             st["dimensions"] = [requested_dim]
         elif requested_dim == "campaign":
-            st["dimensions"] = [_next_acquisition_dimension("sourceMedium")]
+            st["dimensions"] = [_dimension_from_canonical("campaign")]
+        elif requested_dim == "keyword":
+            st["dimensions"] = [_dimension_from_canonical("keyword")]
         else:
             st["dimensions"] = [requested_dim]
     elif drilldown:
@@ -559,6 +617,7 @@ def _merge_analysis_state(current_state: Dict[str, Any], delta: Dict[str, Any]) 
 def _period_prefix_from_state(state: Dict[str, Any]) -> str:
     symbol = str((state.get("period") or {}).get("symbol") or "")
     mapping = {
+        "last_7d": "최근 7일 ",
         "last_week": "지난주 ",
         "this_week": "이번주 ",
         "last_month": "지난달 ",
@@ -579,6 +638,11 @@ def _dimension_label(dim_name: str) -> str:
         "campaignName": "캠페인별",
         "sessionCampaignName": "캠페인별",
         "firstUserCampaignName": "캠페인별",
+        "keyword": "키워드별",
+        "searchTerm": "키워드별",
+        "sessionManualTerm": "키워드별",
+        "firstUserManualTerm": "키워드별",
+        "manualTerm": "키워드별",
         "itemName": "상품별",
         "country": "국가별",
     }
@@ -602,7 +666,7 @@ def _build_query_from_analysis_state(original_question: str, state: Dict[str, An
 
     # 이미 충분히 구체적인 질의는 그대로 유지
     explicit = _analysis_type_from_question(q) and (_analysis_dimension_modifier(q) or _metric_override_from_question(q) or _period_symbol_from_question(q))
-    if explicit and not any(k in q.lower() for k in ["더 내려", "세분", "드릴다운", "원인", "비교", "대비", "증감"]):
+    if explicit and not any(k in q.lower() for k in ["더 내려", "세분", "드릴다운", "drill down", "drilldown", "원인", "비교", "대비", "증감"]):
         return q
 
     if cause:
@@ -675,9 +739,9 @@ def _build_followups_from_state(state: Dict[str, Any], current_question: str) ->
         if dim in ["defaultChannelGroup", "sessionDefaultChannelGroup"]:
             add("소스별로 더 내려서 보여줘")
         elif dim in ["source", "sessionSource"]:
-            add("소스/매체별로 더 내려서 보여줘")
-        elif dim in ["sourceMedium", "sessionSourceMedium"]:
             add("캠페인별로 더 내려서 보여줘")
+        elif dim in ["sourceMedium", "sessionSourceMedium", "campaignName", "sessionCampaignName", "firstUserCampaignName"]:
+            add("키워드별로 더 내려서 보여줘")
         if not compare:
             add("지난주와 그 전주를 비교해 증감 보여줘")
         if not cause:
@@ -734,7 +798,7 @@ def _is_expansion_request(question: str) -> bool:
     q = str(question or "").lower()
     ext_tokens = [
         "비교", "증감", "증감률", "채널별", "소스/매체별", "소스별", "매체별", "상품별", "테이블", "표", "원인",
-        "더 내려", "세분", "드릴다운", "상세", "깊게", "나눠서"
+        "더 내려", "세분", "드릴다운", "drill down", "drilldown", "상세", "깊게", "나눠서"
     ]
     has_ext = any(t in q for t in ext_tokens)
     sig = _intent_signature(question)
@@ -747,6 +811,8 @@ def _detect_drilldown_dimension(current_q: str, previous_q: str) -> str:
     prev = str(previous_q or "").lower()
     if any(k in cur for k in ["캠페인", "campaign"]):
         return "캠페인별"
+    if any(k in cur for k in ["키워드", "keyword", "검색어"]):
+        return "키워드별"
     if any(k in cur for k in ["소스/매체", "source/medium", "source medium"]):
         return "소스/매체별"
     if any(k in cur for k in ["소스", "source"]):
@@ -760,13 +826,14 @@ def _detect_drilldown_dimension(current_q: str, previous_q: str) -> str:
     if any(k in cur for k in ["상품", "카테고리", "후원명", "donation_name"]):
         return "상품별"
     # "더 내려서/세분화"처럼 차원 미지정 확장 질의는 acquisition 계층으로 한 단계 이동
-    if any(k in cur for k in ["더 내려", "세분", "드릴다운", "상세", "깊게"]):
-        if "채널" in prev:
+    if any(k in cur for k in ["더 내려", "세분", "드릴다운", "drill down", "drilldown", "상세", "깊게"]):
+        # canonical hierarchy: channel -> source -> campaign -> keyword
+        if any(k in prev for k in ["채널별", "채널 기준", "channel"]):
             return "소스별"
         if any(k in prev for k in ["소스별", "소스 기준", "source"]):
-            return "소스/매체별"
-        if any(k in prev for k in ["소스/매체", "source/medium", "매체"]):
             return "캠페인별"
+        if any(k in prev for k in ["캠페인별", "campaign"]):
+            return "키워드별"
         if any(k in prev for k in ["유입", "경로", "트래픽"]):
             return "채널별"
     return ""
@@ -912,6 +979,12 @@ def _ensure_compare_output_structure(body: Dict[str, Any], question: str) -> Dic
 
 def _build_reask_suggestions(question: str) -> List[str]:
     sig = _intent_signature(question)
+    if sig["channel"]:
+        return [
+            "현재 채널 기준으로 캠페인까지 내려서 보여드릴까요?",
+            "채널별 활성 사용자 보여줘",
+            "소스별로 더 내려서 보여줘"
+        ]
     if sig["revenue"] and sig["channel"]:
         return ["구매 수익을 채널별로 볼까요?", "소스/매체 기준으로 볼까요?", "기간을 지난주로 고정할까요?"]
     if sig["revenue"]:
@@ -924,11 +997,20 @@ def _build_reask_suggestions(question: str) -> List[str]:
 
 
 def _build_contextual_clarify_message(question: str) -> str:
-    return "질문 의도는 이해했어요. 현재 조건으로는 분석 기준이 부족해 바로 실행이 어려워요. 기간 또는 분석 기준(예: 채널/소스/상품) 중 하나만 지정해 주세요."
+    q = (question or "").lower()
+    if any(k in q for k in ["유입", "채널", "소스", "매체", "경로", "트래픽"]):
+        return "좋아요. 현재 채널 기준으로 캠페인까지 내려서 보여드릴까요?"
+    if any(k in q for k in ["매출", "수익", "revenue"]):
+        return "좋아요. 현재 기간 기준으로 채널별 매출까지 내려서 보여드릴까요?"
+    if any(k in q for k in ["사용자", "유저", "후원자", "구매자"]):
+        return "좋아요. 현재 사용자 기준을 채널별로 나눠서 보여드릴까요?"
+    return "좋아요. 현재 기준을 유지해서 한 단계 더 내려서 보여드릴까요?"
 
 
 def _extract_period_prefix(text: str) -> str:
     q = str(text or "").lower()
+    if any(k in q for k in ["최근 7일", "최근7일", "최근 일주일", "last 7 days"]):
+        return "최근 7일 "
     if "지난주" in q:
         return "지난주 "
     if "지난달" in q:
@@ -2544,6 +2626,10 @@ def get_traffic_data(dimensions, metrics, start_date, end_date, property_id):
 def _resolve_summary_date_range(question: str) -> Tuple[str, str]:
     q = (question or "").lower()
     today = date.today()
+    if any(k in q for k in ["최근 7일", "최근7일", "최근 일주일", "last 7 days"]):
+        start = today - timedelta(days=6)
+        end = today
+        return start.isoformat(), end.isoformat()
     if "지난주" in q:
         # 이전 주(월~일)
         this_monday = today - timedelta(days=today.weekday())
@@ -2564,8 +2650,8 @@ def _resolve_summary_date_range(question: str) -> Tuple[str, str]:
     if "어제" in q:
         d = (today - timedelta(days=1)).isoformat()
         return d, d
-    # 기본: 최근 7일(어제까지)
-    end = today - timedelta(days=1)
+    # 기본: 최근 7일(today-6 ~ today)
+    end = today
     start = end - timedelta(days=6)
     return start.isoformat(), end.isoformat()
 
@@ -3657,7 +3743,7 @@ def ask_question():
         if not prev_user_q:
             current_state = session.get("current_analysis_state")
             ql_tmp = (original_question or "").lower()
-            if _is_expansion_request(original_question) or any(k in ql_tmp for k in ["원인", "이유", "왜", "더 내려", "세분", "드릴다운"]):
+            if _is_expansion_request(original_question) or any(k in ql_tmp for k in ["원인", "이유", "왜", "더 내려", "세분", "드릴다운", "drill down", "drilldown"]):
                 prev_user_q = _build_anchor_query_from_state(current_state)
         question = _merge_with_previous_query(original_question, prev_user_q)
         if _is_likely_ga_data_question(original_question):

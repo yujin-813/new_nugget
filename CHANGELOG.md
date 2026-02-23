@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.9.8 - 2026-02-24
+- Added explicit drill-down hierarchy rules for acquisition analysis:
+- canonical flow: `channel -> source -> campaign -> keyword` (keyword falls back to campaign when metadata is unavailable).
+- Updated drill-down request handling:
+- `더 내려서 / drill down` now follows hierarchy progression instead of broad fallback.
+- Period parser hardening:
+- `지난주` = Monday~Sunday, `이번주` = Monday~today, `최근 7일` = today-6~today.
+- Default summary period aligned to recent-7-day rule.
+- Clarify fallback tone/action improved:
+- Replaced generic “분석 기준 부족” message with actionable suggestion
+  (e.g., “현재 채널 기준으로 캠페인까지 내려서 보여드릴까요?”).
+
 ## v0.9.7 - 2026-02-24
 - Metrics are now managed as an array in analysis state:
 - `함께/같이/추가` style requests append metrics instead of replacing existing ones.
