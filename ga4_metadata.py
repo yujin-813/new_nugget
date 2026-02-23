@@ -299,6 +299,30 @@ GA4_DIMENSIONS = {
         "priority": 5,
         "description": "Default Channel Group"
     },
+    "campaignName": {
+        "ui_name": "캠페인",
+        "aliases": ["campaign", "캠페인명"],
+        "kr_semantics": ["캠페인별"],
+        "category": "traffic",
+        "priority": 4,
+        "description": "Campaign Name"
+    },
+    "sessionCampaignName": {
+        "ui_name": "세션 캠페인",
+        "aliases": ["session campaign", "세션캠페인"],
+        "kr_semantics": ["캠페인별"],
+        "category": "traffic",
+        "priority": 4,
+        "description": "Session Campaign Name"
+    },
+    "firstUserCampaignName": {
+        "ui_name": "최초 사용자 캠페인",
+        "aliases": ["first user campaign", "최초캠페인"],
+        "kr_semantics": ["캠페인별"],
+        "category": "traffic",
+        "priority": 3,
+        "description": "First User Campaign Name"
+    },
 
     # ------------------ User ------------------
     "userAgeBracket": {

@@ -193,6 +193,401 @@ def _intent_signature(text: str) -> Dict[str, bool]:
     }
 
 
+def _default_analysis_state() -> Dict[str, Any]:
+    return {
+        "analysis_type": "summary",  # summary | acquisition | revenue | product
+        "period": {"current": None, "previous": None, "symbol": None},
+        "metrics": ["activeUsers"],
+        "dimensions": [],
+        "comparison": False,
+        "filters": [],
+        "cause_analysis": False,
+        "asked_queries": []
+    }
+
+
+def _coerce_analysis_state(raw: Any) -> Dict[str, Any]:
+    base = _default_analysis_state()
+    if not isinstance(raw, dict):
+        return base
+    out = dict(base)
+    out.update({k: v for k, v in raw.items() if k in out})
+    if not isinstance(out.get("period"), dict):
+        out["period"] = dict(base["period"])
+    else:
+        p = dict(base["period"])
+        p.update({k: v for k, v in out["period"].items() if k in p})
+        out["period"] = p
+    if not isinstance(out.get("metrics"), list):
+        out["metrics"] = list(base["metrics"])
+    if not isinstance(out.get("dimensions"), list):
+        out["dimensions"] = []
+    if not isinstance(out.get("filters"), list):
+        out["filters"] = []
+    if not isinstance(out.get("asked_queries"), list):
+        out["asked_queries"] = []
+    return out
+
+
+def _analysis_type_from_question(question: str) -> str:
+    q = (question or "").lower()
+    if any(k in q for k in ["요약", "브리핑", "한눈", "summary"]):
+        return "summary"
+    if any(k in q for k in ["유입", "채널", "소스", "매체", "경로", "campaign", "캠페인"]):
+        return "acquisition"
+    if any(k in q for k in ["매출", "수익", "매출액", "revenue", "후원금액"]):
+        return "revenue"
+    if any(k in q for k in ["상품", "item", "제품", "카테고리", "후원명", "donation_name"]):
+        return "product"
+    return ""
+
+
+def _period_symbol_from_question(question: str) -> str:
+    q = (question or "").lower()
+    if "지난주" in q:
+        return "last_week"
+    if "이번주" in q or "이번 주" in q:
+        return "this_week"
+    if "지난달" in q:
+        return "last_month"
+    if "이번달" in q or "이번 달" in q:
+        return "this_month"
+    if "어제" in q:
+        return "yesterday"
+    if "오늘" in q:
+        return "today"
+    return ""
+
+
+def _period_symbol_to_range(symbol: str) -> Tuple[str, str]:
+    today = date.today()
+    if symbol == "today":
+        s = e = today
+    elif symbol == "yesterday":
+        s = e = today - timedelta(days=1)
+    elif symbol == "last_week":
+        s = today - timedelta(days=today.weekday() + 7)
+        e = s + timedelta(days=6)
+    elif symbol == "this_week":
+        s = today - timedelta(days=today.weekday())
+        e = today
+    elif symbol == "last_month":
+        first_this_month = today.replace(day=1)
+        e = first_this_month - timedelta(days=1)
+        s = e.replace(day=1)
+    elif symbol == "this_month":
+        s = today.replace(day=1)
+        e = today
+    else:
+        s = today - timedelta(days=7)
+        e = today
+    return s.strftime("%Y-%m-%d"), e.strftime("%Y-%m-%d")
+
+
+def _previous_period_range(current_range: str) -> str:
+    try:
+        s_text, e_text = [x.strip() for x in str(current_range).split("~", 1)]
+        s = datetime.strptime(s_text, "%Y-%m-%d").date()
+        e = datetime.strptime(e_text, "%Y-%m-%d").date()
+        days = (e - s).days + 1
+        ps = s - timedelta(days=days)
+        pe = e - timedelta(days=days)
+        return f"{ps.strftime('%Y-%m-%d')} ~ {pe.strftime('%Y-%m-%d')}"
+    except Exception:
+        return ""
+
+
+def _analysis_dimension_modifier(question: str) -> str:
+    q = (question or "").lower()
+    if any(k in q for k in ["캠페인", "campaign"]):
+        return "campaign"
+    if any(k in q for k in ["소스/매체", "source/medium"]):
+        return "sourceMedium"
+    if any(k in q for k in ["소스", "source"]):
+        return "source"
+    if any(k in q for k in ["채널", "channel"]):
+        return "defaultChannelGroup"
+    if any(k in q for k in ["상품", "item", "카테고리", "후원명", "donation_name"]):
+        return "itemName"
+    if any(k in q for k in ["국가", "country"]):
+        return "country"
+    return ""
+
+
+def _acquisition_hierarchy() -> List[str]:
+    campaign_dim = ""
+    for cand in ["campaignName", "sessionCampaignName", "firstUserCampaignName", "customEvent:campaign_name"]:
+        if cand in GA4_DIMENSIONS:
+            campaign_dim = cand
+            break
+    hierarchy = ["defaultChannelGroup", "source", "sourceMedium"]
+    if campaign_dim:
+        hierarchy.append(campaign_dim)
+    return hierarchy
+
+
+def _next_acquisition_dimension(current_dim: str) -> str:
+    hierarchy = _acquisition_hierarchy()
+    if not current_dim:
+        return hierarchy[0]
+    alias = {
+        "sessionDefaultChannelGroup": "defaultChannelGroup",
+        "sessionSource": "source",
+        "sessionSourceMedium": "sourceMedium",
+    }
+    cur = alias.get(current_dim, current_dim)
+    if cur in hierarchy:
+        idx = hierarchy.index(cur)
+        if idx + 1 < len(hierarchy):
+            return hierarchy[idx + 1]
+        return hierarchy[-1]
+    return hierarchy[0]
+
+
+def _metric_defaults_for_analysis(analysis_type: str) -> List[str]:
+    if analysis_type == "revenue":
+        return ["purchaseRevenue"]
+    if analysis_type == "product":
+        return ["itemRevenue"]
+    if analysis_type == "acquisition":
+        return ["activeUsers"]
+    return ["activeUsers"]
+
+
+def _metric_override_from_question(question: str) -> str:
+    q = (question or "").lower()
+    if any(k in q for k in ["매출", "수익", "금액", "revenue"]):
+        return "purchaseRevenue"
+    if any(k in q for k in ["구매자", "후원자", "purchaser"]):
+        return "totalPurchasers"
+    if any(k in q for k in ["세션"]):
+        return "sessions"
+    if any(k in q for k in ["이벤트", "클릭", "횟수", "건수", "event"]):
+        return "eventCount"
+    if any(k in q for k in ["사용자", "유저", "명", "user"]):
+        return "activeUsers"
+    return ""
+
+
+def _parse_state_delta(question: str, current_state: Dict[str, Any]) -> Dict[str, Any]:
+    q = (question or "").strip()
+    ql = q.lower()
+    compare = any(k in ql for k in ["비교", "대비", "증감", "전주", "전월", "vs"])
+    drilldown = any(k in ql for k in ["더 내려", "세분", "드릴다운", "상세", "깊게"])
+    cause = any(k in ql for k in ["원인", "이유", "왜", "해석"])
+    return {
+        "analysis_type": _analysis_type_from_question(q),
+        "period_symbol": _period_symbol_from_question(q),
+        "dimension_modifier": _analysis_dimension_modifier(q),
+        "comparison": compare,
+        "drilldown": drilldown,
+        "cause": cause,
+        "metric_override": _metric_override_from_question(q),
+        "raw": q
+    }
+
+
+def _merge_analysis_state(current_state: Dict[str, Any], delta: Dict[str, Any]) -> Dict[str, Any]:
+    st = _coerce_analysis_state(current_state)
+    d = dict(delta or {})
+    requested_type = str(d.get("analysis_type") or "").strip()
+    requested_dim = str(d.get("dimension_modifier") or "").strip()
+    requested_period = str(d.get("period_symbol") or "").strip()
+    compare = bool(d.get("comparison"))
+    drilldown = bool(d.get("drilldown"))
+    cause = bool(d.get("cause"))
+    metric_override = str(d.get("metric_override") or "").strip()
+    q_raw = str(d.get("raw") or "").strip()
+
+    # 원인 분석은 기본적으로 현재 컨텍스트 유지
+    if requested_type and not cause:
+        st["analysis_type"] = requested_type
+
+    if requested_period:
+        s, e = _period_symbol_to_range(requested_period)
+        st["period"]["symbol"] = requested_period
+        st["period"]["current"] = f"{s} ~ {e}"
+        st["period"]["previous"] = None
+
+    # modifier override
+    if requested_dim:
+        if st["analysis_type"] == "acquisition" and requested_dim in {"defaultChannelGroup", "source", "sourceMedium"}:
+            st["dimensions"] = [requested_dim]
+        elif requested_dim == "campaign":
+            st["dimensions"] = [_next_acquisition_dimension("sourceMedium")]
+        else:
+            st["dimensions"] = [requested_dim]
+    elif drilldown:
+        if st["analysis_type"] == "acquisition":
+            cur_dim = st["dimensions"][0] if st["dimensions"] else ""
+            st["dimensions"] = [_next_acquisition_dimension(cur_dim)]
+
+    # acquisition 기본 차원
+    if st["analysis_type"] == "acquisition" and not st["dimensions"]:
+        st["dimensions"] = [_next_acquisition_dimension("")]
+
+    if compare:
+        st["comparison"] = True
+        if st["period"]["current"]:
+            st["period"]["previous"] = _previous_period_range(st["period"]["current"])
+    elif requested_period:
+        # period만 변경된 경우 이전 비교 해제
+        st["comparison"] = False
+        st["period"]["previous"] = None
+
+    st["cause_analysis"] = cause
+
+    # metric 유지 원칙: 원인 분석에서는 기존 metric 고정
+    if not st["metrics"]:
+        st["metrics"] = _metric_defaults_for_analysis(st["analysis_type"])
+    if metric_override and not cause:
+        st["metrics"] = [metric_override]
+    elif requested_type and not cause:
+        st["metrics"] = _metric_defaults_for_analysis(st["analysis_type"])
+
+    # 질문 기록(재추천 금지에 사용)
+    if q_raw:
+        key = _normalize_text_key(q_raw)
+        history = [str(x) for x in (st.get("asked_queries") or []) if str(x).strip()]
+        if key not in history:
+            history.append(key)
+        st["asked_queries"] = history[-20:]
+
+    return st
+
+
+def _period_prefix_from_state(state: Dict[str, Any]) -> str:
+    symbol = str((state.get("period") or {}).get("symbol") or "")
+    mapping = {
+        "last_week": "지난주 ",
+        "this_week": "이번주 ",
+        "last_month": "지난달 ",
+        "this_month": "이번달 ",
+        "today": "오늘 ",
+        "yesterday": "어제 ",
+    }
+    return mapping.get(symbol, "")
+
+
+def _dimension_label(dim_name: str) -> str:
+    if not dim_name:
+        return ""
+    labels = {
+        "defaultChannelGroup": "채널별",
+        "source": "소스별",
+        "sourceMedium": "소스/매체별",
+        "campaignName": "캠페인별",
+        "sessionCampaignName": "캠페인별",
+        "firstUserCampaignName": "캠페인별",
+        "itemName": "상품별",
+        "country": "국가별",
+    }
+    return labels.get(dim_name, f"{GA4_DIMENSIONS.get(dim_name, {}).get('ui_name', dim_name)}별")
+
+
+def _build_query_from_analysis_state(original_question: str, state: Dict[str, Any]) -> str:
+    q = str(original_question or "").strip()
+    st = _coerce_analysis_state(state)
+    atype = st["analysis_type"]
+    metric = (st.get("metrics") or ["activeUsers"])[0]
+    dim = (st.get("dimensions") or [""])[0]
+    period_prefix = _period_prefix_from_state(st)
+    compare = bool(st.get("comparison"))
+    cause = bool(st.get("cause_analysis"))
+
+    metric_ui = GA4_METRICS.get(metric, {}).get("ui_name") or metric
+    dim_label = _dimension_label(dim)
+
+    # 이미 충분히 구체적인 질의는 그대로 유지
+    explicit = _analysis_type_from_question(q) and (_analysis_dimension_modifier(q) or _metric_override_from_question(q) or _period_symbol_from_question(q))
+    if explicit and not any(k in q.lower() for k in ["더 내려", "세분", "드릴다운", "원인", "비교", "대비", "증감"]):
+        return q
+
+    if cause:
+        if dim_label:
+            return f"{period_prefix}{dim_label} {metric_ui}를 유지하고 breakdown으로 원인 분석해줘. sessions, engagementRate, conversionRate도 함께 보여줘".strip()
+        return f"{period_prefix}{metric_ui}를 유지하고 원인 분석해줘. sessions, engagementRate, conversionRate도 함께 보여줘".strip()
+
+    if atype == "summary":
+        if compare and st.get("period", {}).get("symbol") == "last_week":
+            return "지난주와 그 전주 활성 사용자 수, 구매 수익, 이벤트 TOP 10을 비교 요약해줘"
+        if compare:
+            return f"{period_prefix}활성 사용자 수, 구매 수익, 이벤트 TOP 10을 이전 기간과 비교해 요약해줘".strip()
+        return f"{period_prefix}활성 사용자 수, 구매 수익, 이벤트 TOP 10을 요약해줘".strip()
+
+    if atype == "acquisition":
+        if compare and st.get("period", {}).get("symbol") == "last_week":
+            return f"지난주와 그 전주 {dim_label} {metric_ui}를 비교해 증감과 증감률을 보여줘".strip()
+        if compare:
+            return f"{period_prefix}{dim_label} {metric_ui}를 이전 기간과 비교해 증감과 증감률을 보여줘".strip()
+        return f"{period_prefix}{dim_label} {metric_ui}를 보여줘".strip()
+
+    if atype == "revenue":
+        if compare and st.get("period", {}).get("symbol") == "last_week":
+            return f"지난주와 그 전주 {dim_label or '전체'} 매출을 비교해 증감과 증감률을 보여줘".strip()
+        if compare:
+            return f"{period_prefix}{dim_label or '전체'} 매출을 이전 기간과 비교해 증감과 증감률을 보여줘".strip()
+        if dim_label:
+            return f"{period_prefix}{dim_label} 매출을 보여줘".strip()
+        return f"{period_prefix}구매 수익을 알려줘".strip()
+
+    # product
+    if compare and st.get("period", {}).get("symbol") == "last_week":
+        return "지난주와 그 전주 상품별 매출 TOP 10을 비교해 증감과 증감률을 보여줘"
+    if compare:
+        return f"{period_prefix}상품별 매출 TOP 10을 이전 기간과 비교해 증감과 증감률을 보여줘".strip()
+    return f"{period_prefix}상품별 매출 TOP 10을 보여줘".strip()
+
+
+def _build_followups_from_state(state: Dict[str, Any], current_question: str) -> List[str]:
+    st = _coerce_analysis_state(state)
+    asked = set(st.get("asked_queries") or [])
+    atype = st.get("analysis_type")
+    dim = (st.get("dimensions") or [""])[0]
+    compare = bool(st.get("comparison"))
+    cause = bool(st.get("cause_analysis"))
+    out: List[str] = []
+
+    def add(x: str):
+        s = re.sub(r"\s+", " ", str(x or "")).strip()
+        if not s:
+            return
+        if _normalize_text_key(s) == _normalize_text_key(current_question):
+            return
+        if _normalize_text_key(s) in asked:
+            return
+        if s not in out:
+            out.append(s)
+
+    if atype == "acquisition":
+        if dim in ["defaultChannelGroup", "sessionDefaultChannelGroup"]:
+            add("소스별로 더 내려서 보여줘")
+        elif dim in ["source", "sessionSource"]:
+            add("소스/매체별로 더 내려서 보여줘")
+        elif dim in ["sourceMedium", "sessionSourceMedium"]:
+            add("캠페인별로 더 내려서 보여줘")
+        if not compare:
+            add("지난주와 그 전주를 비교해 증감 보여줘")
+        if not cause:
+            add("원인 분석해줘")
+        add("전환율도 함께 보여줘")
+    elif atype == "revenue":
+        add("상품별 매출 TOP 10 보여줘")
+        add("채널별 매출로 나눠줘")
+        if not compare:
+            add("지난주와 그 전주 매출 비교해줘")
+    elif atype == "product":
+        add("상품 카테고리별로 묶어서 보여줘")
+        add("상위 상품 원인 분석해줘")
+        if not compare:
+            add("지난주와 그 전주 상품별 매출 비교해줘")
+    else:
+        add("채널별 유입 분석해줘")
+        add("지난주와 그 전주 비교해줘")
+        add("원인 분석해줘")
+
+    return out[:4]
+
 def _normalize_text_key(text: str) -> str:
     t = str(text or "").lower()
     t = re.sub(r"\s+", "", t)
@@ -308,11 +703,13 @@ def _build_anchor_query_from_state(state: Dict[str, Any]) -> str:
     metrics = state.get("metrics") or []
     dims = state.get("dimensions") or []
     if isinstance(metrics, list) and metrics:
-        m_name = (metrics[0] or {}).get("name")
+        m0 = metrics[0]
+        m_name = m0.get("name") if isinstance(m0, dict) else str(m0)
         if m_name:
             metric_label = GA4_METRICS.get(m_name, {}).get("ui_name") or str(m_name)
     if isinstance(dims, list) and dims:
-        d_name = (dims[0] or {}).get("name")
+        d0 = dims[0]
+        d_name = d0.get("name") if isinstance(d0, dict) else str(d0)
         if d_name:
             dim_label = GA4_DIMENSIONS.get(d_name, {}).get("ui_name") or str(d_name)
     if metric_label and dim_label:
@@ -1871,6 +2268,7 @@ def ensure_new_conversation():
         "last_user_question",
         "last_response",
         "current_analysis_state",
+        "current_ga_plan_state",
     ]:
         session.pop(key, None)
     
@@ -2713,6 +3111,12 @@ def ask_question():
     try:
         data = request.get_json()
         original_question = (data.get('question') or "").strip()
+        analysis_state = _coerce_analysis_state(session.get("current_analysis_state"))
+        if original_question and not _is_general_chat_text(original_question):
+            delta = _parse_state_delta(original_question, analysis_state)
+            analysis_state = _merge_analysis_state(analysis_state, delta)
+            session["current_analysis_state"] = analysis_state
+
         prev_user_q = str(session.get("last_user_question") or "")
         if not prev_user_q:
             current_state = session.get("current_analysis_state")
@@ -2720,6 +3124,8 @@ def ask_question():
             if _is_expansion_request(original_question) or any(k in ql_tmp for k in ["원인", "이유", "왜", "더 내려", "세분", "드릴다운"]):
                 prev_user_q = _build_anchor_query_from_state(current_state)
         question = _merge_with_previous_query(original_question, prev_user_q)
+        if _is_likely_ga_data_question(original_question):
+            question = _build_query_from_analysis_state(original_question, analysis_state)
         question = _normalize_summary_request(question)
         beginner_mode = bool(data.get("beginner_mode", False))
         session["beginner_mode"] = beginner_mode
@@ -2771,6 +3177,14 @@ def ask_question():
                 if question in suggestions:
                     is_followup_selected = True
                     selected_followup_text = question
+
+        # 추천 클릭으로 질문이 치환된 경우 상태도 해당 질문으로 재병합
+        if is_followup_selected and selected_followup_text:
+            delta2 = _parse_state_delta(selected_followup_text, analysis_state)
+            analysis_state = _merge_analysis_state(analysis_state, delta2)
+            session["current_analysis_state"] = analysis_state
+            if _is_likely_ga_data_question(selected_followup_text):
+                question = _build_query_from_analysis_state(selected_followup_text, analysis_state)
 
         property_id = session.get("property_id")
         # 🔥 파일 경로 세션 연동 (전처리 우선)
@@ -3019,6 +3433,11 @@ def ask_question():
                     current_question=original_question,
                     last_user_question=last_q_for_followup
                 )
+                if str(r or "").lower() in {"ga4", "ga4_followup"}:
+                    b["followup_suggestions"] = _build_followups_from_state(
+                        state=_coerce_analysis_state(session.get("current_analysis_state")),
+                        current_question=original_question
+                    )
                 if isinstance(response.get("response"), dict):
                     response["response"] = b
                 else:
@@ -3027,7 +3446,7 @@ def ask_question():
         # [P0] Session Save
         session['last_response'] = response
 
-        # 현재 분석 상태(JSON) 세션 유지: 확장/드릴다운 판단의 기준으로 사용
+        # GA 실행 상태는 별도 캐시로 저장 (대화 상태 모델과 분리)
         try:
             route_now = ""
             if isinstance(response, dict):
@@ -3035,7 +3454,7 @@ def ask_question():
             if route_now in {"ga4", "ga4_followup"} and conversation_id:
                 current_state = DBManager.load_last_state(conversation_id, source="ga4")
                 if isinstance(current_state, dict):
-                    session["current_analysis_state"] = current_state
+                    session["current_ga_plan_state"] = current_state
         except Exception as _e:
             app.logger.warning(f"Failed to cache current analysis state in session: {_e}")
 
