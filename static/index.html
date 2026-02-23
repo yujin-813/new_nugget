@@ -328,6 +328,37 @@
             word-break: keep-all;
         }
 
+        .summary-block {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .summary-core {
+            background: #eef4ff;
+            border: 1px solid #d7e4ff;
+            border-radius: 10px;
+            padding: 10px 12px;
+            font-weight: 700;
+            color: #1f3f77;
+        }
+
+        .summary-evidence {
+            margin: 0;
+            padding-left: 18px;
+            color: #31435f;
+            line-height: 1.55;
+        }
+
+        .summary-note {
+            font-size: 12px;
+            color: #5c6f90;
+            background: #f7faff;
+            border: 1px dashed #d7e4ff;
+            border-radius: 8px;
+            padding: 8px 10px;
+        }
+
         .followup-box {
             margin-top: 12px;
             padding: 10px 12px;
@@ -2023,10 +2054,53 @@
         }
 
         function formatMessageHtml(text) {
-            const escaped = escapeHtml(text).replace(/\r\n/g, '\n');
-            return escaped
-                .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-                .replace(/\n/g, '<br>');
+            const raw = String(text ?? "").replace(/\r\n/g, '\n').trim();
+            const lines = raw.split('\n').map(x => x.trim()).filter(Boolean);
+            const hasSummaryShape = lines.some(line =>
+                /^핵심\s*:/.test(line) || /^근거\s*:/.test(line) || /^참고\s*:/.test(line) || /^[-•]\s+/.test(line)
+            );
+
+            const inline = (s) => escapeHtml(s).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+
+            if (!hasSummaryShape) {
+                return inline(raw).replace(/\n/g, '<br>');
+            }
+
+            let core = "";
+            const evidence = [];
+            let note = "";
+
+            lines.forEach(line => {
+                if (/^핵심\s*:/.test(line)) {
+                    core = line.replace(/^핵심\s*:\s*/, '').trim();
+                    return;
+                }
+                if (/^근거\s*:/.test(line)) {
+                    const v = line.replace(/^근거\s*:\s*/, '').trim();
+                    if (v) evidence.push(v);
+                    return;
+                }
+                if (/^참고\s*:/.test(line)) {
+                    note = line.replace(/^참고\s*:\s*/, '').trim();
+                    return;
+                }
+                if (/^[-•]\s+/.test(line)) {
+                    const v = line.replace(/^[-•]\s+/, '').trim();
+                    if (v) evidence.push(v);
+                    return;
+                }
+                if (!core) core = line;
+                else evidence.push(line);
+            });
+
+            const evidenceHtml = evidence.slice(0, 3).map(item => `<li>${inline(item)}</li>`).join('');
+            return `
+                <div class="summary-block">
+                    ${core ? `<div class="summary-core">핵심: ${inline(core)}</div>` : ''}
+                    ${evidenceHtml ? `<ul class="summary-evidence">${evidenceHtml}</ul>` : ''}
+                    ${note ? `<div class="summary-note">참고: ${inline(note)}</div>` : ''}
+                </div>
+            `;
         }
 
         function extractMessageAndFollowups(text, explicitFollowups = []) {
@@ -2235,7 +2309,7 @@
             }
 
             if (data.insight_narrative) {
-                html += `<div class="insight"><p>${data.insight_narrative.replace(/\n/g, "<br>")}</p></div>`;
+                html += `<div class="insight">${formatMessageHtml(data.insight_narrative)}</div>`;
             }
 
             card.innerHTML = html;
