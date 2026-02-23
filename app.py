@@ -1,5 +1,6 @@
 import logging
 from datetime import timedelta
+import uuid
 from flask import Flask, request, jsonify, session, redirect, url_for, send_from_directory, Response
 from werkzeug.utils import secure_filename
 from werkzeug.middleware.proxy_fix import ProxyFix
@@ -426,6 +427,14 @@ def _build_ga_retry_candidates(question: str) -> List[str]:
 
     # 원문과 동일한 것은 제외
     return [c for c in out if c and c != q][:8]
+
+
+def _is_likely_ga_data_question(question: str) -> bool:
+    q = (question or "").lower()
+    return any(k in q for k in [
+        "매출", "수익", "구매", "사용자", "세션", "이벤트", "클릭", "전환",
+        "채널", "소스", "매체", "지난주", "지난달", "이번주", "이번달", "ga4"
+    ])
 
 
 def _normalize_summary_request(question: str) -> str:
@@ -2272,6 +2281,21 @@ def ask_question():
                 if not _is_ga_no_match_response(response2):
                     response = response2
                     break
+                # 상태 오염 가능성 대비: 깨끗한 conversation에서 1회 재실행
+                clean_conv = f"{conversation_id}:clean:{uuid.uuid4().hex[:8]}"
+                response3 = handle_question(
+                    ga_retry_q,
+                    property_id=property_id,
+                    file_path=file_path,
+                    user_id=user_id,
+                    conversation_id=clean_conv,
+                    semantic=semantic,
+                    beginner_mode=bool(session.get("beginner_mode", False))
+                )
+                if not _is_ga_no_match_response(response3):
+                    logging.info(f"[Ask] GA clean-state retry success: {ga_retry_q}")
+                    response = response3
+                    break
 
             # 요약 질문인데 여전히 실패하면 핵심 KPI 질의를 분해 실행해서 합성 응답
             if _is_ga_no_match_response(response) and _is_summary_request(question):
@@ -2289,7 +2313,7 @@ def ask_question():
                             property_id=property_id,
                             file_path=file_path,
                             user_id=user_id,
-                            conversation_id=conversation_id,
+                            conversation_id=f"{conversation_id}:summary:{uuid.uuid4().hex[:8]}",
                             semantic=semantic,
                             beginner_mode=bool(session.get("beginner_mode", False))
                         )
@@ -2314,6 +2338,22 @@ def ask_question():
                             ]
                         }
                     }
+
+        # 마지막 GA 구조적 안전망: 데이터 질문이면 깨끗한 상태로 원문 1회 재시도
+        if _is_ga_no_match_response(response) and _is_likely_ga_data_question(question):
+            clean_conv = f"{conversation_id}:final:{uuid.uuid4().hex[:8]}"
+            logging.info(f"[Ask] Final clean-state retry: {question}")
+            response4 = handle_question(
+                question,
+                property_id=property_id,
+                file_path=file_path,
+                user_id=user_id,
+                conversation_id=clean_conv,
+                semantic=semantic,
+                beginner_mode=bool(session.get("beginner_mode", False))
+            )
+            if not _is_ga_no_match_response(response4):
+                response = response4
 
         response = _apply_bad_regression_guard(user_id=user_id, question=question, response=response)
         # guardrail이 과개입해 확인 질문으로 끝난 경우, 실행 가능한 표준 질의로 1회 자동 보정
