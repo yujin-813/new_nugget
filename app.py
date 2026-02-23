@@ -457,6 +457,11 @@ def _rewrite_followup_with_context(followup: str, last_user_question: str) -> st
         return f
     if _is_general_chat_text(last_q):
         return f
+    # 이미 독립 실행 가능한 문장은 컨텍스트 재작성하지 않음
+    if any(k in f for k in ["지난주", "지난달", "이번주", "이번달", "오늘", "어제"]):
+        return f
+    if "요약" in f and ("채널별" in f or "비교" in f):
+        return f
 
     if "채널별" in f:
         return f"{last_q}를 채널별로 나눠서 보여줘"
@@ -1824,6 +1829,64 @@ def _direct_ga_summary_fallback(question: str, property_id: str) -> Dict[str, An
         return None
 
 
+def _clean_summary_line(text: str) -> str:
+    s = str(text or "").strip()
+    s = re.sub(r"^좋아요\.\s*", "", s)
+    s = re.sub(r"^핵심\s*:\s*", "", s)
+    s = re.sub(r"^[-•]\s*", "", s)
+    return s.strip()
+
+
+def _direct_ga_user_trend_fallback(question: str, property_id: str) -> Dict[str, Any] | None:
+    q = (question or "").lower()
+    if not property_id or 'credentials' not in session:
+        return None
+    if not (("사용자" in q or "유저" in q) and any(k in q for k in ["추이", "트렌드", "흐름", "일별"])):
+        return None
+    try:
+        start_date, end_date = _resolve_summary_date_range(question)
+        trend = get_traffic_data(
+            dimensions=[{"name": "date"}],
+            metrics=[{"name": "activeUsers"}],
+            start_date=start_date,
+            end_date=end_date,
+            property_id=property_id
+        )
+        if trend.empty or "date" not in trend.columns or "activeUsers" not in trend.columns:
+            return None
+        trend["activeUsers"] = pd.to_numeric(trend["activeUsers"], errors="coerce").fillna(0)
+        trend = trend.sort_values("date")
+        first = trend.iloc[0]
+        last = trend.iloc[-1]
+        first_val = int(first.get("activeUsers", 0))
+        last_val = int(last.get("activeUsers", 0))
+        diff = last_val - first_val
+        diff_txt = f"+{diff:,}" if diff >= 0 else f"{diff:,}"
+        msg = (
+            f"핵심: 지난주 사용자 추이를 확인했어요.\n"
+            f"- 시작일 사용자: {first_val:,}명\n"
+            f"- 마지막일 사용자: {last_val:,}명\n"
+            f"- 기간 내 변화: {diff_txt}명"
+        )
+        return {
+            "route": "ga4",
+            "response": {
+                "message": msg,
+                "plot_data": [],
+                "period": f"{start_date} ~ {end_date}",
+                "raw_data": trend.to_dict("records"),
+                "followup_suggestions": [
+                    "지난주 사용자 추이를 채널별로 나눠줘",
+                    "지난주 사용자 추이를 이전 기간과 비교해줘",
+                    "지난주 사용자 수를 소스/매체별로 보여줘"
+                ]
+            }
+        }
+    except Exception as e:
+        logging.warning(f"[Ask] direct ga user trend fallback failed: {e}")
+        return None
+
+
 def _build_period_summary_via_simple_queries(
     question: str,
     property_id: str,
@@ -1856,7 +1919,7 @@ def _build_period_summary_via_simple_queries(
             sb = sr.get("response") if isinstance(sr, dict) and isinstance(sr.get("response"), dict) else sr
             smsg = str((sb or {}).get("message", "")).strip() if isinstance(sb, dict) else ""
             if smsg:
-                first_line = smsg.splitlines()[0].strip()
+                first_line = _clean_summary_line(smsg.splitlines()[0].strip())
                 # 실패/무매칭 문구는 요약에 포함하지 않음
                 if _is_no_data_or_no_match_response(sr):
                     continue
@@ -2575,6 +2638,10 @@ def ask_question():
             )
             if not _is_ga_no_match_response(response4):
                 response = response4
+            else:
+                trend_fb = _direct_ga_user_trend_fallback(question=original_question, property_id=property_id)
+                if isinstance(trend_fb, dict):
+                    response = trend_fb
 
         response = _apply_bad_regression_guard(user_id=user_id, question=question, response=response)
         # guardrail이 과개입해 확인 질문으로 끝난 경우, 실행 가능한 표준 질의로 1회 자동 보정
@@ -2662,7 +2729,7 @@ def ask_question():
                 user_id=user_id,
                 conversation_id=conversation_id,
                 route=route or "unknown",
-                question=question,
+                question=original_question,
                 response=body,
                 has_plot=has_plot,
                 has_raw_data=has_raw_data,
@@ -2670,7 +2737,7 @@ def ask_question():
             )
 
         # 다음 피드백 연결을 위해 직전 질의/응답 저장
-        session["last_user_question"] = question
+        session["last_user_question"] = original_question
         session["last_response"] = response
 
         # [P0] Sanitize Response (NaN -> None)
