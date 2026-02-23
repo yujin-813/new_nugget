@@ -536,6 +536,14 @@ def _merge_analysis_state(current_state: Dict[str, Any], delta: Dict[str, Any]) 
         # 타입 전환 시에도 비교/확장 맥락이면 기존 metric 유지
         if not compare and not drilldown and not metric_append:
             st["metrics"] = _metric_defaults_for_analysis(st["analysis_type"])
+    if cause:
+        # 원인 분석은 카테고리 전환이 아니라 metric 확장 요청
+        cause_support = ["sessions", "engagementRate", "conversionRate"]
+        merged_cause = list(st.get("metrics") or [])
+        for m in cause_support:
+            if m not in merged_cause:
+                merged_cause.append(m)
+        st["metrics"] = _dedupe_metrics(merged_cause)
 
     # 질문 기록(재추천 금지에 사용)
     if q_raw:
@@ -2571,6 +2579,28 @@ def _previous_period(start_date: str, end_date: str) -> Tuple[str, str]:
     return prev_start.isoformat(), prev_end.isoformat()
 
 
+def _resolve_period_ranges_from_state_or_question(state: Dict[str, Any], question: str) -> Tuple[str, str, str, str]:
+    st = _coerce_analysis_state(state)
+    period_current = str((st.get("period") or {}).get("current") or "").strip()
+    period_previous = str((st.get("period") or {}).get("previous") or "").strip()
+    if not period_current:
+        ps = _period_symbol_from_question(question)
+        if ps:
+            s, e = _period_symbol_to_range(ps)
+            period_current = f"{s} ~ {e}"
+        else:
+            s, e = _resolve_summary_date_range(question)
+            period_current = f"{s} ~ {e}"
+    if not period_previous and bool(st.get("comparison")):
+        period_previous = _previous_period_range(period_current)
+    cur_start, cur_end = [x.strip() for x in period_current.split("~", 1)]
+    if period_previous and "~" in period_previous:
+        prev_start, prev_end = [x.strip() for x in period_previous.split("~", 1)]
+    else:
+        prev_start, prev_end = _previous_period(cur_start, cur_end)
+    return cur_start, cur_end, prev_start, prev_end
+
+
 def _direct_ga_summary_fallback(question: str, property_id: str) -> Dict[str, Any] | None:
     if not property_id or 'credentials' not in session:
         return None
@@ -2800,21 +2830,7 @@ def _direct_ga_state_compare_fallback(question: str, property_id: str, state: Di
         return None
 
     try:
-        period_current = str((st.get("period") or {}).get("current") or "").strip()
-        period_previous = str((st.get("period") or {}).get("previous") or "").strip()
-        if not period_current:
-            ps = _period_symbol_from_question(question)
-            if ps:
-                s, e = _period_symbol_to_range(ps)
-                period_current = f"{s} ~ {e}"
-            else:
-                s, e = _resolve_summary_date_range(question)
-                period_current = f"{s} ~ {e}"
-        if not period_previous:
-            period_previous = _previous_period_range(period_current)
-
-        cur_start, cur_end = [x.strip() for x in period_current.split("~", 1)]
-        prev_start, prev_end = [x.strip() for x in period_previous.split("~", 1)]
+        cur_start, cur_end, prev_start, prev_end = _resolve_period_ranges_from_state_or_question(st, question)
 
         requested_metrics = _dedupe_metrics((st.get("metrics") or []) + _metric_overrides_from_question(question))
         if not requested_metrics:
@@ -2990,6 +3006,126 @@ def _direct_ga_state_compare_fallback(question: str, property_id: str, state: Di
                 "followup_suggestions": _build_followups_from_state(st, question)
             }
         }
+
+
+def _direct_ga_cause_analysis_fallback(question: str, property_id: str, state: Dict[str, Any]) -> Dict[str, Any] | None:
+    if not property_id or 'credentials' not in session:
+        return None
+    st = _coerce_analysis_state(state)
+    if not bool(st.get("cause_analysis")):
+        return None
+    try:
+        cur_start, cur_end, _, _ = _resolve_period_ranges_from_state_or_question(st, question)
+        requested_metrics = _dedupe_metrics(st.get("metrics") or [])
+        if not requested_metrics:
+            requested_metrics = ["activeUsers"]
+        # 원인 분석은 보조 metric 확장을 포함
+        for extra in ["sessions", "engagementRate", "conversionRate"]:
+            if extra not in requested_metrics:
+                requested_metrics.append(extra)
+        requested_metrics = _dedupe_metrics(requested_metrics)
+        base_metrics = _expand_metrics_for_query(requested_metrics)
+
+        dim = str(((st.get("dimensions") or [""])[0]) or "")
+        # 차원이 없으면 현재 analysis_type에 맞는 기본 차원으로 보강
+        if not dim:
+            if st.get("analysis_type") == "acquisition":
+                dim = "defaultChannelGroup"
+            elif st.get("analysis_type") in {"product", "revenue"}:
+                dim = "itemName" if "itemName" in GA4_DIMENSIONS else ""
+        dims = [{"name": dim}] if dim else []
+        metric_specs = [{"name": m} for m in base_metrics]
+
+        df = get_traffic_data(dims, metric_specs, cur_start, cur_end, property_id)
+        if df.empty:
+            return {
+                "route": "ga4",
+                "response": {
+                    "message": (
+                        "원인 분석을 시도했지만 데이터가 비어 있어요.\n"
+                        f"- 기간: {cur_start} ~ {cur_end}\n"
+                        f"- 차원: {_dimension_label(dim) if dim else '전체(총합)'}\n"
+                        f"- 지표: {_metrics_ui_label(requested_metrics)}"
+                    ),
+                    "plot_data": [],
+                    "period": f"{cur_start} ~ {cur_end}",
+                    "followup_suggestions": _build_followups_from_state(st, question)
+                }
+            }
+
+        rows = []
+        if dim:
+            for _, row in df.iterrows():
+                item = {dim: row.get(dim)}
+                for bm in base_metrics:
+                    item[bm] = float(row.get(bm, 0) or 0)
+                item = _apply_derived_metrics_to_row(item, requested_metrics)
+                rows.append(item)
+        else:
+            item = {}
+            for bm in base_metrics:
+                item[bm] = float(df.iloc[0].get(bm, 0) or 0)
+            item = _apply_derived_metrics_to_row(item, requested_metrics)
+            rows = [item]
+
+        # 기준 metric(첫 metric)로 정렬/집중도 계산
+        primary = requested_metrics[0] if requested_metrics else "activeUsers"
+        primary_ui = "전환율" if primary == "conversionRate" else (GA4_METRICS.get(primary, {}).get("ui_name") or primary)
+        rows_sorted = sorted(rows, key=lambda r: float(_to_number(r.get(primary)) or 0), reverse=True)
+
+        total_primary = sum(float(_to_number(r.get(primary)) or 0) for r in rows_sorted) if dim else float(_to_number(rows_sorted[0].get(primary)) or 0)
+        top1_val = float(_to_number(rows_sorted[0].get(primary)) or 0)
+        top3_val = sum(float(_to_number(r.get(primary)) or 0) for r in rows_sorted[:3]) if dim else top1_val
+        top1_share = (top1_val / total_primary * 100.0) if total_primary else 0.0
+        top3_share = (top3_val / total_primary * 100.0) if total_primary else 0.0
+
+        dim_key = dim if dim else "total"
+        top_name = str(rows_sorted[0].get(dim_key, "전체")) if dim else "전체"
+
+        extra_lines = []
+        for m in ["sessions", "engagementRate", "conversionRate"]:
+            if m not in requested_metrics:
+                continue
+            mv = _to_number(rows_sorted[0].get(m))
+            if mv is None:
+                continue
+            label = "전환율" if m == "conversionRate" else (GA4_METRICS.get(m, {}).get("ui_name") or m)
+            suffix = "%" if m in {"engagementRate", "conversionRate"} else ""
+            val_txt = f"{mv:,.2f}{suffix}" if suffix else f"{mv:,.0f}"
+            extra_lines.append(f"- {label}: {val_txt}")
+
+        msg_lines = [
+            "원인 분석을 현재 컨텍스트에서 확장했어요.",
+            f"- 분석 기간: {cur_start} ~ {cur_end}",
+            f"- 분석 기준: {_dimension_label(dim) if dim else '전체(총합)'}",
+            f"- 핵심 지표: {primary_ui}",
+            f"- 1위 항목: {top_name}",
+            f"- 1위 비중: {top1_share:.1f}%",
+        ]
+        if dim:
+            msg_lines.append(f"- 상위 3개 비중: {top3_share:.1f}%")
+        msg_lines.extend(extra_lines[:3])
+
+        top_rows = rows_sorted[:10]
+        labels = [str(r.get(dim, "전체")) for r in top_rows] if dim else ["전체"]
+        series = [float(_to_number(r.get(primary)) or 0) for r in top_rows]
+        return {
+            "route": "ga4",
+            "response": {
+                "message": "\n".join(msg_lines),
+                "period": f"{cur_start} ~ {cur_end}",
+                "plot_data": {
+                    "type": "bar",
+                    "labels": labels,
+                    "series": [{"name": primary_ui, "data": series}]
+                },
+                "raw_data": top_rows,
+                "followup_suggestions": _build_followups_from_state(st, question)
+            }
+        }
+    except Exception as e:
+        logging.warning(f"[Ask] direct ga cause analysis fallback failed: {e}")
+        return None
 
 
 def _build_period_summary_via_simple_queries(
@@ -3621,6 +3757,13 @@ def ask_question():
         # 비교 질의는 상태 기반으로 총합/차원 비교를 자동 생성
         if response is None and property_id:
             response = _direct_ga_state_compare_fallback(
+                question=original_question,
+                property_id=property_id,
+                state=analysis_state
+            )
+        # 원인 분석은 현재 컨텍스트를 유지한 metric 확장으로 실행
+        if response is None and property_id:
+            response = _direct_ga_cause_analysis_fallback(
                 question=original_question,
                 property_id=property_id,
                 state=analysis_state

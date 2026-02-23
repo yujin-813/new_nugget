@@ -11,6 +11,9 @@
 - Compare without dimension is explicitly allowed and handled as total comparison.
 - Failure fallback improved:
 - Instead of silent/empty response, failed data queries now return condition-aware explanation (source/period/dimension/metrics).
+- Cause-analysis handling refined:
+- `원인 분석` is now treated as context-preserving metric expansion (no analysis-type jump), with support metrics appended (`sessions`, `engagementRate`, `conversionRate`).
+- Added GA4 cause-analysis fallback that executes from current state and reports concentration/share with auxiliary metrics.
 
 ## v0.9.6 - 2026-02-23
 - Fixed comparison-intent handling for ambiguous follow-up queries:
