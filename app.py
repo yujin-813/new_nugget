@@ -558,7 +558,7 @@ def _soften_message_tone(message: str, question: str = "") -> str:
     for a, b in replacements.items():
         s = s.replace(a, b)
     # 지나치게 기계적인 첫 문장 완화
-    if "입니다." in s and not s.startswith(("좋아요", "요청하신", "데이터를 보면")):
+    if "입니다." in s and not s.startswith(("좋아요", "요청하신", "데이터를 보면", "핵심:", "- ", "참고:")):
         s = "좋아요. " + s
     return s
 
@@ -1856,7 +1856,18 @@ def _build_period_summary_via_simple_queries(
             sb = sr.get("response") if isinstance(sr, dict) and isinstance(sr.get("response"), dict) else sr
             smsg = str((sb or {}).get("message", "")).strip() if isinstance(sb, dict) else ""
             if smsg:
-                summary_parts.append(smsg.splitlines()[0])
+                first_line = smsg.splitlines()[0].strip()
+                # 실패/무매칭 문구는 요약에 포함하지 않음
+                if _is_no_data_or_no_match_response(sr):
+                    continue
+                if any(bad in first_line for bad in [
+                    "요청하신 조건으로는 데이터를 찾지 못",
+                    "질문 의도는 이해했지만",
+                    "매칭 가능한 지표를 찾지 못",
+                    "조회된 데이터가 없",
+                ]):
+                    continue
+                summary_parts.append(first_line)
         except Exception:
             continue
     if len(summary_parts) >= 2:
@@ -2615,7 +2626,7 @@ def ask_question():
                 b["followup_suggestions"] = _normalize_followups(
                     route=str(r or ""),
                     body=b,
-                    current_question=question,
+                    current_question=original_question,
                     last_user_question=last_q_for_followup
                 )
                 if isinstance(response.get("response"), dict):
