@@ -507,6 +507,64 @@ def _extract_curr_prev(line: str) -> Tuple[float, float]:
     return cur, prev
 
 
+def _detect_period_from_lines(lines: List[str]) -> str:
+    text = "\n".join(lines or [])
+
+    m = re.search(
+        r"기준\s*기간\s*[:：]?\s*(\d{4}[./-]\d{1,2}[./-]\d{1,2})\s*[~\-]\s*(\d{4}[./-]\d{1,2}[./-]\d{1,2})",
+        text,
+        flags=re.I
+    )
+    if m:
+        s = m.group(1).replace(".", "-").replace("/", "-")
+        e = m.group(2).replace(".", "-").replace("/", "-")
+        return f"{s} ~ {e}"
+
+    dates = re.findall(r"\b(\d{4}[./-]\d{1,2}[./-]\d{1,2})\b", text)
+    if len(dates) >= 2:
+        s = dates[0].replace(".", "-").replace("/", "-")
+        e = dates[-1].replace(".", "-").replace("/", "-")
+        return f"{s} ~ {e}"
+
+    months = re.findall(r"\b(20\d{2})[^\d]?(0[1-9]|1[0-2])\b", text)
+    if months:
+        y, mth = months[-1]
+        return f"{y}-{mth}"
+    return ""
+
+
+def _build_auto_insight_snapshot(
+    growth_rates: List[Dict[str, Any]],
+    composition: Dict[str, Any],
+    risk_flags: List[Dict[str, Any]]
+) -> List[str]:
+    out = []
+    sorted_growth = sorted(
+        [g for g in growth_rates if isinstance(g, dict)],
+        key=lambda x: abs(_safe_float(x.get("change_pct", 0))),
+        reverse=True
+    )
+    for g in sorted_growth[:2]:
+        metric = str(g.get("metric", "지표")).strip() or "지표"
+        pct = _safe_float(g.get("change_pct", 0))
+        arrow = "증가" if pct >= 0 else "감소"
+        out.append(f"{metric} {abs(pct):.1f}% {arrow}")
+
+    top3 = _safe_float((composition or {}).get("top3_concentration_pct", 0))
+    if top3 > 0:
+        out.append(f"상위 3개 항목 집중도 {top3:.1f}%")
+
+    if risk_flags:
+        top_risk = risk_flags[0]
+        if isinstance(top_risk, dict):
+            level = str(top_risk.get("level", "medium")).upper()
+            risk = str(top_risk.get("risk", "")).strip()
+            if risk:
+                out.append(f"리스크[{level}] {risk}")
+
+    return out[:3]
+
+
 def _preprocess_report_data(title: str, html_content: str) -> Dict[str, Any]:
     text = _strip_report_html_to_text(html_content)
     lines = [ln for ln in text.splitlines() if ln.strip()]
@@ -605,6 +663,9 @@ def _preprocess_report_data(title: str, html_content: str) -> Dict[str, Any]:
     if any(g.get("prev") in [None, 0] and g.get("current") not in [None, 0] for g in growth_rates):
         risk_flags.append({"risk": "이전값 0/미존재로 비교 불가 항목 존재", "level": "medium"})
 
+    detected_period = _detect_period_from_lines(lines)
+    auto_snapshot = _build_auto_insight_snapshot(growth_rates, composition, risk_flags)
+
     return {
         "title": title,
         "source_lines": lines[:300],
@@ -614,7 +675,9 @@ def _preprocess_report_data(title: str, html_content: str) -> Dict[str, Any]:
         "anomalies": anomalies,
         "comparison_basis": comparison_basis,
         "composition": composition,
-        "risk_flags": risk_flags
+        "risk_flags": risk_flags,
+        "detected_period": detected_period,
+        "auto_snapshot": auto_snapshot
     }
 
 
@@ -936,17 +999,24 @@ def _report_object_to_notion_markdown(
         f"- 작성일: {today}",
         "- 작성자: ",
         "- 데이터 소스: GA4 / File / Mixed",
-        "- 분석 기간: ",
+        f"- 분석 기간: {pre.get('detected_period') or '-'}",
         "- 리포트 버전: v2 (planner/writer-json)",
         ""
     ]
 
-    lines += ["## 2) KPI 변화 추적"]
+    auto_snapshot = pre.get("auto_snapshot", []) or []
+    if auto_snapshot:
+        lines += ["## 2) 자동 인사이트 스냅샷"]
+        for s in auto_snapshot[:3]:
+            lines.append(f"- {s}")
+        lines.append("")
+
+    lines += ["## 3) KPI 변화 추적"]
     for g in pre.get("growth_rates", [])[:8]:
         cp = g.get("change_pct", 0.0)
         metric = g.get("metric", "metric")
         lines.append(f"- {metric}: {cp:+.1f}%")
-    if len(lines) > 0 and lines[-1] == "## 2) KPI 변화 추적":
+    if len(lines) > 0 and lines[-1] == "## 3) KPI 변화 추적":
         lines.pop()  # 데이터 없으면 섹션 제외
     else:
         lines.append(f"- 비교 기준: {planner.get('comparison_basis', pre.get('comparison_basis', '평균 대비'))}")
@@ -957,7 +1027,7 @@ def _report_object_to_notion_markdown(
     top3 = comp.get("top3_concentration_pct", 0.0)
     top5 = comp.get("top5_concentration_pct", 0.0)
     if top3 > 0 or top5 > 0:
-        lines += ["## 3) 구성비/집중도"]
+        lines += ["## 4) 구성비/집중도"]
         lines.append(f"- 상위 3개 집중도: {top3:.1f}%")
         lines.append(f"- 상위 5개 집중도: {top5:.1f}%")
         item_shares = comp.get("item_share_pct", [])[:5]
@@ -968,14 +1038,14 @@ def _report_object_to_notion_markdown(
     # 리스크 탐지 섹션
     risk_flags = pre.get("risk_flags", [])
     if risk_flags:
-        lines += ["## 4) 집중 리스크 탐지(코드 기반)"]
+        lines += ["## 5) 집중 리스크 탐지(코드 기반)"]
         for r in risk_flags[:5]:
             if isinstance(r, dict):
                 lines.append(f"- [{str(r.get('level','medium')).upper()}] {r.get('risk','')}")
         lines.append("")
 
     lines += [
-        "## 5) 판단 기록 (Decision Log)",
+        "## 6) 판단 기록 (Decision Log)",
         "| 날짜 | 관찰/근거 | 판단 | 영향도 | 담당 |",
         "|---|---|---|---|---|",
         "|  |  |  |  |  |",
@@ -983,7 +1053,7 @@ def _report_object_to_notion_markdown(
     ]
 
     lines += [
-        "## 6) 실행 관리 (Action Tracker)",
+        "## 7) 실행 관리 (Action Tracker)",
         "| 실행 항목 | 목적 KPI | 오너 | 기한 | 상태 | 결과 |",
         "|---|---|---|---|---|---|",
     ]
@@ -993,13 +1063,13 @@ def _report_object_to_notion_markdown(
         )
     lines.append("")
 
-    lines += ["## 7) Executive Summary"]
+    lines += ["## 8) Executive Summary"]
     for s in report_obj.get("executive_summary", [])[:3]:
         lines.append(f"- {s}")
     lines.append("")
 
     if report_obj.get("trend_analysis"):
-        lines += ["## 8) Trend Analysis"]
+        lines += ["## 9) Trend Analysis"]
         lines += ["| Metric | Current | Prev | Change % |", "|---|---:|---:|---:|"]
         for t in report_obj.get("trend_analysis", [])[:10]:
             cur = "" if t.get("current") is None else f"{_safe_float(t.get('current')):,.0f}"
@@ -1009,18 +1079,18 @@ def _report_object_to_notion_markdown(
         lines.append("")
 
     if report_obj.get("hypotheses"):
-        lines += ["## 9) Hypotheses"]
+        lines += ["## 10) Hypotheses"]
         for h in report_obj.get("hypotheses", [])[:3]:
             lines.append(f"1. {h}")
         lines.append("")
 
     if report_obj.get("risks"):
-        lines += ["## 10) Risks"]
+        lines += ["## 11) Risks"]
         for r in report_obj.get("risks", [])[:3]:
             lines.append(f"- [{str(r.get('level','medium')).upper()}] {r.get('risk','')}")
         lines.append("")
 
-    lines += ["## 11) Planner 메타"]
+    lines += ["## 12) Planner 메타"]
     lines.append(f"- 분석 타입: {planner.get('analysis_type','trend')}")
     lines.append(f"- 핵심 KPI: {', '.join(planner.get('core_kpis', []))}")
     lines.append(f"- 비교 기준: {planner.get('comparison_basis', pre.get('comparison_basis', '평균 대비'))}")
@@ -1030,7 +1100,7 @@ def _report_object_to_notion_markdown(
     lines.append("")
 
     if pre.get("source_lines"):
-        lines += ["## 12) 원본 분석 스냅샷"]
+        lines += ["## 13) 원본 분석 스냅샷"]
         for ln in pre.get("source_lines", [])[:30]:
             lines.append(f"- {ln}")
     return "\n".join(lines).strip() + "\n"
@@ -1211,10 +1281,7 @@ def fetch_properties(analytics, account_id):
 
 @app.route("/")
 def index():
-    if 'credentials' not in session:
-        app.logger.info("No credentials in session. Redirecting to login.")
-        return redirect(url_for('login'))
-    app.logger.info("Credentials found in session. Serving index page.")
+    app.logger.info("Serving index page.")
     return send_from_directory('static', 'index.html')
 
 @app.route("/login")
@@ -1356,8 +1423,11 @@ def get_traffic_data(dimensions, metrics, start_date, end_date, property_id):
 def list_all():
     try:
         if 'credentials' not in session:
-            app.logger.error("No credentials in session. Redirecting to login.")
-            return redirect(url_for('login'))
+            return jsonify({
+                "error": "GA4 login required",
+                "requires_login": True,
+                "login_url": url_for('login')
+            }), 401
 
         credentials = google.oauth2.credentials.Credentials(**session['credentials'])
         credentials = refresh_credentials(credentials)
@@ -1378,8 +1448,11 @@ def list_all():
 def list_properties():
     try:
         if 'credentials' not in session:
-            app.logger.error("No credentials in session. Redirecting to login.")
-            return redirect(url_for('login'))
+            return jsonify({
+                "error": "GA4 login required",
+                "requires_login": True,
+                "login_url": url_for('login')
+            }), 401
 
         account_id = request.args.get('accountId')
         if not account_id:
@@ -1402,6 +1475,13 @@ def list_properties():
 
 @app.route("/set_property", methods=["POST"])
 def set_property():
+    if 'credentials' not in session:
+        return jsonify({
+            "error": "GA4 login required",
+            "requires_login": True,
+            "login_url": url_for('login')
+        }), 401
+
     data = request.get_json()
 
     property_id = data.get("property_id")
@@ -2277,6 +2357,27 @@ def learning_status():
         return jsonify({"success": True, "user_id": user_id, "days": max(1, min(days, 365)), "summary": summary})
     except Exception as e:
         logging.error(f"Error getting learning status: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/feedback_snapshot', methods=['GET'])
+def feedback_snapshot():
+    """User-facing feedback summary for quick UI reflection (good/bad + bad hotspots)."""
+    try:
+        user_id = session.get("user_id", "anonymous")
+        days = request.args.get("days", default=14, type=int)
+        days = max(1, min(days, 365))
+        label_summary = DBManager.get_label_status(user_id=user_id, days=days)
+        regression = DBManager.get_regression_snapshot(user_id=user_id, days=days, limit=100)
+        return jsonify({
+            "success": True,
+            "user_id": user_id,
+            "days": days,
+            "label_summary": label_summary,
+            "regression_snapshot": regression
+        })
+    except Exception as e:
+        logging.error(f"Error getting feedback snapshot: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
 
 

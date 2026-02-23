@@ -23,7 +23,7 @@
             --border-color: #e0e0e0;
             --sidebar-width: 20%;
             --chat-width: 45%;
-            --report-width: 35%;
+            --report-width: 38%;
             --navbar-height: 60px;
         }
 
@@ -437,15 +437,13 @@
         .report-panel {
             width: var(--report-width);
             min-width: 350px;
-            background: #f0f2f5;
-            /* Light Gray Background for distinct 'workspace' feel */
-            border-left: 1px solid var(--border-color);
+            background: linear-gradient(180deg, #eef3fb 0%, #f6f9ff 100%);
+            border-left: 1px solid #d6e2f2;
             display: flex;
             flex-direction: column;
             transition: width 0.3s ease, transform 0.3s ease;
             position: relative;
             z-index: 1001;
-            /* Above minimal layout */
         }
 
         .report-panel.collapsed {
@@ -456,62 +454,133 @@
         }
 
         .report-header {
-            padding: 15px 20px;
-            background: white;
-            border-bottom: 1px solid var(--border-color);
+            padding: 14px 16px;
+            background: #ffffff;
+            border-bottom: 1px solid #dfe7f2;
             display: flex;
             justify-content: space-between;
             align-items: center;
+            position: sticky;
+            top: 0;
+            z-index: 2;
+        }
+
+        .report-header-title {
+            margin: 0;
+            font-size: 15px;
+            font-weight: 800;
+            color: #24364f;
+            letter-spacing: -0.2px;
+        }
+
+        .report-close-btn {
+            background: #f3f7fd;
+            border: 1px solid #d9e3f0;
+            border-radius: 8px;
+            width: 28px;
+            height: 28px;
+            cursor: pointer;
+            font-size: 16px;
+            color: #405168;
         }
 
         /* A4 Paper Style Container */
         .report-container {
             width: 90%;
             max-width: 210mm;
-            /* A4 Width */
             margin: 20px auto;
             background: white;
-            min-height: 297mm;
-            /* A4 Height */
-            padding: 25mm;
-            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
-            /* Minimal shadow */
-            border: 1px solid #e0e0e0;
-            border-radius: 2px;
+            min-height: 250mm;
+            padding: 20px;
+            box-shadow: 0 12px 30px rgba(34, 59, 91, 0.12);
+            border: 1px solid #dae4f1;
+            border-radius: 14px;
             box-sizing: border-box;
             display: flex;
             flex-direction: column;
-            gap: 16px;
+            gap: 12px;
         }
 
         .report-scroll {
             flex: 1;
             overflow-y: auto;
             padding: 0;
-            /* Removing padding to let container handle margins */
-            background: #f0f2f5;
+            background: transparent;
         }
 
         /* Report Card inside Document */
         .report-card {
             background: white;
-            border: 1px solid transparent;
-            /* Cleaner look */
-            border-bottom: 1px solid #eee;
-            /* Separator like */
-            border-radius: 4px;
-            /* Minimal radius */
-            padding: 15px 0;
-            /* Vertical spacing */
+            border: 1px solid #e6ecf5;
+            border-radius: 10px;
+            padding: 14px 12px;
             margin-bottom: 10px;
-            box-shadow: none;
-            /* Flat look for document */
+            box-shadow: 0 2px 8px rgba(25, 50, 83, 0.04);
             position: relative;
         }
 
         .report-card:hover {
-            border-color: #eee;
-            background: #fafafa;
+            border-color: #d7e3f5;
+            background: #fbfdff;
+        }
+
+        .report-title-area {
+            margin-bottom: 8px;
+            border-bottom: 1px solid #e4eaf4;
+            padding-bottom: 10px;
+        }
+
+        .report-title-input {
+            width: 100%;
+            border: none;
+            font-size: 22px;
+            font-weight: 800;
+            outline: none;
+            background: transparent;
+            color: #1d2f46;
+        }
+
+        .report-meta-date {
+            color: #6e7f96;
+            font-size: 12px;
+            margin-top: 5px;
+        }
+
+        .report-toolbar-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 10px;
+            padding: 8px 10px;
+            border: 1px solid #e5ebf5;
+            border-radius: 10px;
+            background: #f7faff;
+        }
+
+        .report-actions-bar {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            margin-bottom: 12px;
+        }
+
+        .report-webhook-card {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            margin-bottom: 10px;
+            border: 1px solid #e5ebf5;
+            border-radius: 10px;
+            padding: 10px;
+            background: #fafcff;
+        }
+
+        .report-agent-card {
+            margin-bottom: 15px;
+            padding: 12px;
+            background: #f9fbff;
+            border-radius: 10px;
+            border: 1px solid #e4ebf7;
         }
 
         /* Onboarding (new home layout) */
@@ -605,8 +674,97 @@
         }
 
         @media (max-width: 768px) {
+            body {
+                overflow: auto;
+                height: auto;
+                min-height: 100vh;
+            }
+
+            .navbar {
+                height: auto;
+                min-height: var(--navbar-height);
+                padding: 10px 12px;
+                flex-wrap: wrap;
+                gap: 8px;
+            }
+
+            .navbar-left,
+            .navbar-right,
+            .navbar-center {
+                width: 100%;
+                display: flex;
+                flex-wrap: wrap;
+                gap: 8px;
+                align-items: center;
+            }
+
+            .navbar-right .outline-btn,
+            .navbar-center .primary-btn {
+                width: 100%;
+                justify-content: center;
+            }
+
+            .workspace {
+                flex-direction: column;
+                overflow: visible;
+                min-height: calc(100vh - var(--navbar-height));
+            }
+
+            .sidebar {
+                width: 100%;
+                min-width: 0;
+                border-right: none;
+                border-bottom: 1px solid var(--border-color);
+                max-height: 38vh;
+            }
+
+            .chat-main {
+                width: 100%;
+                min-height: 56vh;
+                border-right: none;
+            }
+
+            .messages-container {
+                padding: 14px;
+            }
+
+            .modal-content {
+                width: calc(100% - 20px);
+                max-width: none;
+                padding: 18px;
+                border-radius: 12px;
+            }
+
+            .input-area {
+                position: sticky;
+                bottom: 0;
+                z-index: 5;
+            }
+
             .hero-title {
                 font-size: 22px;
+            }
+
+            .report-panel {
+                width: 100%;
+                min-width: 0;
+                position: fixed;
+                top: var(--navbar-height);
+                left: 0;
+                right: 0;
+                bottom: 0;
+                z-index: 1500;
+                transform: translateY(100%);
+                transition: transform 0.25s ease;
+            }
+
+            .report-panel.collapsed {
+                width: 100%;
+                transform: translateY(100%);
+            }
+
+            .report-panel:not(.collapsed) {
+                transform: translateY(0);
             }
         }
 
@@ -698,6 +856,12 @@
             min-height: auto;
             border: none;
             padding: 0;
+        }
+
+        .report-content h3 {
+            margin: 0 0 8px 0;
+            font-size: 15px;
+            color: #26405f;
         }
 
         /* [PHASE 1] Analysis Card Styles */
@@ -884,7 +1048,7 @@
             <button id="connect-data-btn" class="primary-btn" onclick="openConnectModal()">Connect Data</button>
         </div>
         <div class="navbar-right">
-            <button id="report-toggle-btn" class="outline-btn" onclick="toggleReportPanel()">Show Report</button>
+            <button id="report-toggle-btn" class="outline-btn" onclick="toggleReportPanel()">리포트 열기</button>
             <button id="logout-button" class="outline-btn" onclick="logout()">Logout</button>
         </div>
     </div>
@@ -981,24 +1145,26 @@
         <div class="report-panel" id="report-panel">
             <!-- Collapsed by default removed? No, user wants 3-col. Should be open by default. -->
             <div class="report-header">
-                <h3 style="margin:0; font-size:16px;">📄 Report Document</h3>
+                <h3 class="report-header-title">📄 Report Workspace</h3>
                 <div style="display:flex; gap:10px;">
-                    <button onclick="toggleReportPanel()"
-                        style="background:none; border:none; cursor:pointer; font-size:1.2em; color:#666;">&times;</button>
+                    <button class="report-close-btn" onclick="toggleReportPanel()">&times;</button>
                 </div>
             </div>
             <div class="report-scroll">
                 <div id="report-container" class="report-container">
                     <!-- Title Area -->
-                    <div style="margin-bottom:20px; border-bottom:2px solid #333; padding-bottom:10px;">
-                        <input type="text" id="report-title" placeholder="리포트 제목 입력"
-                            style="width:100%; border:none; font-size:24px; font-weight:bold; outline:none; background:transparent;"
-                            value="무제 리포트">
-                        <div style="color:#666; font-size:12px; margin-top:5px;">2026-02-12</div>
+                    <div class="report-title-area">
+                        <input type="text" id="report-title" class="report-title-input" placeholder="리포트 제목 입력" value="무제 리포트">
+                        <div class="report-meta-date">2026-02-12</div>
+                    </div>
+                    <div id="report-snapshot-card"
+                        style="margin-bottom:12px; padding:10px 12px; background:#f7fafc; border:1px solid #e5edf5; border-radius:8px; font-size:12px; color:#2f3b4a;">
+                        <div style="font-weight:700; margin-bottom:6px;">자동 스냅샷</div>
+                        <div id="report-snapshot-content">데이터를 불러오는 중...</div>
                     </div>
 
                     <!-- [PHASE 7] View Mode Toggle -->
-                    <div style="display:flex; align-items:center; gap:6px; margin-right:8px; margin-bottom:10px;">
+                    <div class="report-toolbar-row">
                         <label class="switch" style="position:relative; display:inline-block; width:34px; height:20px;">
                             <input type="checkbox" id="view-mode-toggle" onchange="toggleViewMode(this)">
                             <span class="slider round"
@@ -1028,7 +1194,7 @@
                         <span style="font-size:12px; color:#666;">보기 모드</span>
                     </div>
 
-                    <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px;">
+                    <div class="report-actions-bar">
                         <button class="primary-btn" onclick="saveReport()">저장</button>
                         <button class="outline-btn" style="color:var(--text-main); border-color:var(--text-muted);"
                             onclick="downloadReportAsImage()">PNG 다운로드</button>
@@ -1038,7 +1204,7 @@
                             onclick="exportReportToJandi()">JANDI 웹훅 전송</button>
                     </div>
 
-                    <div style="display:flex; flex-direction:column; gap:8px; margin-bottom:10px; border:1px solid #eee; border-radius:8px; padding:10px;">
+                    <div class="report-webhook-card">
                         <div style="font-size:12px; color:#666; font-weight:700;">JANDI Webhook 설정</div>
                         <div style="display:flex; gap:8px; align-items:center;">
                             <input type="text" id="jandi-webhook-name" placeholder="저장 이름 (예: 마케팅팀 잔디)"
@@ -1061,8 +1227,7 @@
 
 
                     <!-- [PHASE 3] Report Agent Input -->
-                    <div
-                        style="margin-bottom:15px; padding:12px; background:#f9f9f9; border-radius:8px; border:1px solid #eee;">
+                    <div class="report-agent-card">
                         <div style="font-weight:600; font-size:12px; color:#666; margin-bottom:8px;">🤖 Report Agent
                             (Beta)</div>
                         <div style="display:flex; gap:8px;">
@@ -1090,6 +1255,14 @@
                     style="background:none; border:none; cursor:pointer; font-size:1.2em;">&times;</button>
             </div>
             <div class="modal-body">
+                <div class="form-group">
+                    <label>GA4 Login</label>
+                    <div id="ga4-login-help" style="font-size:12px; color:#6d7888; margin-bottom:6px;">
+                        GA4 데이터를 연결할 때만 로그인이 필요합니다.
+                    </div>
+                    <button id="ga4-login-btn" class="outline-btn" style="width:100%; color:#1a1a1a; border-color:#ccd6e5;"
+                        onclick="startGa4Login()">Google로 GA4 로그인</button>
+                </div>
                 <div class="form-group">
                     <label>GA4 Account</label>
                     <select id="account-select" class="form-control">
@@ -1143,24 +1316,25 @@
         let isFetching = false;
         let savedReports = [];
         let lastAskedQuestion = '';
+        let lastKnownPeriodText = '';
 
         /* =========================
            1. 기본 초기화 및 UI 제어
         ========================= */
         document.addEventListener("DOMContentLoaded", () => {
             initChat();
-            fetchAccounts();
             loadPreprocessedDataOptions();
             loadReportsList();
             loadWebhookPresets('jandi');
             updateOnboardingState();
             renderOnboardingInsights();
+            refreshReportSnapshotCard();
 
             const panel = document.getElementById('report-panel');
             panel.classList.add('collapsed');
 
             const btn = document.getElementById("report-toggle-btn");
-            if (btn) btn.innerText = "Show Report";
+            if (btn) btn.innerText = "리포트 열기";
 
             // 데이터 연동 관련 드롭다운 이벤트
             const dataSelectContainer = document.getElementById('data-select-container');
@@ -1175,6 +1349,11 @@
                 const opt = document.getElementById('data-select-options');
                 if (opt) opt.style.display = 'none';
             });
+
+            const ga4LoginPending = localStorage.getItem('ga4_login_pending') === '1';
+            if (ga4LoginPending) {
+                setTimeout(() => openConnectModal(), 120);
+            }
         });
 
 
@@ -1190,13 +1369,14 @@
 
             const btn = document.getElementById("report-toggle-btn");
             if (btn) {
-                btn.innerText = panel.classList.contains("collapsed") ? "Show Report" : "Hide Report";
+                btn.innerText = panel.classList.contains("collapsed") ? "리포트 열기" : "리포트 닫기";
             }
         }
 
 
         function openConnectModal() {
             document.getElementById('connect-modal').classList.add('active');
+            fetchAccounts();
         }
 
         function closeConnectModal() {
@@ -1217,6 +1397,32 @@
             const input = document.getElementById('question-input');
             input.value = text;
             fetchTrafficData();
+        }
+
+        function startGa4Login() {
+            localStorage.setItem('ga4_login_pending', '1');
+            window.location.href = '/login';
+        }
+
+        function updateGa4AuthUI(authenticated) {
+            const loginHelp = document.getElementById('ga4-login-help');
+            const loginBtn = document.getElementById('ga4-login-btn');
+            const accountSelect = document.getElementById('account-select');
+            const propertySelect = document.getElementById('property-select');
+            if (!loginHelp || !loginBtn || !accountSelect || !propertySelect) return;
+
+            if (authenticated) {
+                loginHelp.textContent = 'GA4 로그인 완료. 계정/속성을 선택해 연결하세요.';
+                loginBtn.style.display = 'none';
+                accountSelect.disabled = false;
+                propertySelect.disabled = false;
+                localStorage.removeItem('ga4_login_pending');
+            } else {
+                loginHelp.textContent = 'GA4 데이터를 연결할 때만 로그인이 필요합니다.';
+                loginBtn.style.display = 'inline-block';
+                accountSelect.disabled = true;
+                propertySelect.disabled = true;
+            }
         }
 
         function isDataConnected() {
@@ -1244,7 +1450,7 @@
             }
         }
 
-        function renderOnboardingInsights() {
+        async function renderOnboardingInsights() {
             const ul = document.getElementById('auto-insight-list');
             if (!ul) return;
             const connected = isDataConnected();
@@ -1256,11 +1462,73 @@
                 `;
                 return;
             }
-            ul.innerHTML = `
-                <li>지난 7일 매출 +12%</li>
-                <li>국내사업후원 비중 51%</li>
-                <li>Organic 채널 18% 성장</li>
-            `;
+            try {
+                const [feedbackRes, learningRes] = await Promise.all([
+                    fetch('/feedback_snapshot?days=14'),
+                    fetch('/learning_status?days=14')
+                ]);
+                const feedbackData = feedbackRes.ok ? await feedbackRes.json() : {};
+                const learningData = learningRes.ok ? await learningRes.json() : {};
+
+                const summary = feedbackData.label_summary || {};
+                const regression = feedbackData.regression_snapshot || {};
+                const learning = (learningData && learningData.summary) ? learningData.summary : {};
+                const goodRate = Number(summary.good_rate || 0).toFixed(1);
+                const total = Number(summary.total || 0);
+                const abstainRate = Number(learning.abstain_rate || 0).toFixed(1);
+                const topBad = Array.isArray(regression.top_bad_questions) ? regression.top_bad_questions[0] : null;
+
+                const rows = [];
+                rows.push(`최근 14일 라벨 반영 ${total.toLocaleString()}건 · Good 비율 ${goodRate}%`);
+                rows.push(`최근 14일 무응답/회피율 ${abstainRate}%`);
+                if (topBad && topBad.question) {
+                    rows.push(`반복 실패 질문: ${escapeHtml(String(topBad.question).slice(0, 40))}`);
+                } else {
+                    rows.push('반복 실패 패턴 없음(최근 14일)');
+                }
+                ul.innerHTML = rows.map(x => `<li>${x}</li>`).join('');
+            } catch (err) {
+                ul.innerHTML = `
+                    <li>피드백 스냅샷을 불러오지 못했습니다.</li>
+                    <li>질문/응답 후 Good/Bad 라벨을 남기면 자동 반영됩니다.</li>
+                    <li>잠시 후 다시 시도해 주세요.</li>
+                `;
+            }
+        }
+
+        async function refreshReportSnapshotCard() {
+            const box = document.getElementById('report-snapshot-content');
+            if (!box) return;
+            try {
+                const [feedbackRes, learningRes] = await Promise.all([
+                    fetch('/feedback_snapshot?days=14'),
+                    fetch('/learning_status?days=14')
+                ]);
+                const feedbackData = feedbackRes.ok ? await feedbackRes.json() : {};
+                const learningData = learningRes.ok ? await learningRes.json() : {};
+
+                const summary = feedbackData.label_summary || {};
+                const regression = feedbackData.regression_snapshot || {};
+                const learning = (learningData && learningData.summary) ? learningData.summary : {};
+                const counts = summary.counts || {};
+                const good = Number(counts.good || 0);
+                const bad = Number(counts.bad || 0);
+                const goodRate = Number(summary.good_rate || 0).toFixed(1);
+                const abstainRate = Number(learning.abstain_rate || 0).toFixed(1);
+                const topBad = Array.isArray(regression.top_bad_questions) ? regression.top_bad_questions[0] : null;
+                const periodText = lastKnownPeriodText ? escapeHtml(lastKnownPeriodText) : '-';
+
+                const lines = [];
+                lines.push(`기준 기간: ${periodText}`);
+                lines.push(`피드백 반영: Good ${good.toLocaleString()} / Bad ${bad.toLocaleString()} (Good ${goodRate}%)`);
+                lines.push(`회피율(최근 14일): ${abstainRate}%`);
+                if (topBad && topBad.question) {
+                    lines.push(`반복 실패 질문: ${escapeHtml(String(topBad.question).slice(0, 50))}`);
+                }
+                box.innerHTML = lines.map(x => `<div>• ${x}</div>`).join('');
+            } catch (err) {
+                box.textContent = '스냅샷을 불러오지 못했습니다.';
+            }
         }
 
         function renderRecentReportsPreview(reports = []) {
@@ -1323,6 +1591,9 @@
                 const response = data.response || {};
                 const interactionId = data.interaction_id || response.interaction_id || null;
                 const periodText = response.period || data.period || null;
+                if (periodText) {
+                    lastKnownPeriodText = String(periodText);
+                }
                 const dataLabel = response.data_label || null;
                 const collectionPeriod = response.collection_period || null;
 
@@ -1349,6 +1620,7 @@
                     badge.innerText = `Mode: ${String(data.route).toUpperCase()}`;
                     badge.classList.add('active');
                 }
+                refreshReportSnapshotCard();
 
             } catch (err) {
                 appendMessage('bot', "오류 발생: " + err.message);
@@ -1455,11 +1727,19 @@
 
             goodBtn.onclick = async () => {
                 const ok = await labelInteraction(interactionId, 'good');
-                if (ok) setLockedState(goodBtn, badBtn);
+                if (ok) {
+                    setLockedState(goodBtn, badBtn);
+                    renderOnboardingInsights();
+                    refreshReportSnapshotCard();
+                }
             };
             badBtn.onclick = async () => {
                 const ok = await labelInteraction(interactionId, 'bad');
-                if (ok) setLockedState(badBtn, goodBtn);
+                if (ok) {
+                    setLockedState(badBtn, goodBtn);
+                    renderOnboardingInsights();
+                    refreshReportSnapshotCard();
+                }
             };
 
             wrap.appendChild(goodBtn);
@@ -1964,22 +2244,38 @@
         async function fetchAccounts() {
             try {
                 const res = await fetch("/list_all");
-                const accounts = await res.json();
                 const select = document.getElementById("account-select");
+                const propSelect = document.getElementById("property-select");
                 select.innerHTML = '<option value="">Select Account</option>';
+                propSelect.innerHTML = '<option value="">Select Property</option>';
+
+                if (res.status === 401) {
+                    updateGa4AuthUI(false);
+                    return;
+                }
+
+                const accounts = await res.json();
+                updateGa4AuthUI(true);
                 accounts.forEach(acc => {
                     const option = document.createElement("option");
                     option.value = acc.id;
                     option.textContent = acc.name;
                     select.appendChild(option);
                 });
-            } catch (err) { console.error(err); }
+            } catch (err) {
+                console.error(err);
+                updateGa4AuthUI(false);
+            }
         }
 
         document.getElementById("account-select")?.addEventListener("change", async (e) => {
             const accountId = e.target.value;
             if (!accountId) return;
             const res = await fetch(`/list_properties?accountId=${accountId}`);
+            if (res.status === 401) {
+                updateGa4AuthUI(false);
+                return;
+            }
             const data = await res.json();
 
             console.log("properties response:", data);
@@ -2021,6 +2317,9 @@
                 updateOnboardingState();
                 renderOnboardingInsights();
                 closeConnectModal();
+            } else if (res.status === 401) {
+                updateGa4AuthUI(false);
+                appendMessage('bot', 'GA4 연결을 위해 먼저 로그인해 주세요.');
             }
         }
 
@@ -2400,6 +2699,29 @@
             document.getElementById('report').innerHTML = '<div class="report-column" data-column="1"></div>';
             openReportPanel();
         }
+
+        function buildReportSnapshotBlockHtml() {
+            const snapshotContent = document.getElementById('report-snapshot-content');
+            const period = lastKnownPeriodText ? escapeHtml(lastKnownPeriodText) : '-';
+            const body = snapshotContent ? snapshotContent.innerHTML : '• 기준 기간: -';
+            return `
+                <div class="report-card report-snapshot-block" style="position:relative; border-left:4px solid #1976d2;">
+                    <div class="report-content" contenteditable="false">
+                        <h3>자동 스냅샷</h3>
+                        <div style="font-size:11px; color:#6d7a8a; margin-bottom:6px;">기준 기간: ${period}</div>
+                        <div>${body}</div>
+                    </div>
+                </div>
+            `;
+        }
+
+        function getReportContentWithSnapshot(column) {
+            const clone = column.cloneNode(true);
+            clone.querySelectorAll('.report-snapshot-block').forEach(el => el.remove());
+            clone.insertAdjacentHTML('afterbegin', buildReportSnapshotBlockHtml());
+            return clone.innerHTML;
+        }
+
         async function saveReport() {
             const column = document.querySelector('.report-column');
             if (!column || column.children.length === 0) {
@@ -2412,7 +2734,7 @@
             const title = titleInput.value.trim() || "AI Data Report " + new Date().toLocaleDateString();
 
             // Collect content (Simplified: HTML content or structured data)
-            const reportContent = column.innerHTML;
+            const reportContent = getReportContentWithSnapshot(column);
 
             try {
                 const res = await fetch('/save_report', {
@@ -2445,7 +2767,7 @@
 
             const titleInput = document.getElementById('report-title');
             const title = titleInput ? (titleInput.value.trim() || "Untitled Report") : "Untitled Report";
-            const content = column.innerHTML;
+            const content = getReportContentWithSnapshot(column);
 
             try {
                 const res = await fetch('/export_report/notion', {
@@ -2578,7 +2900,7 @@
 
             const titleInput = document.getElementById('report-title');
             const title = titleInput ? (titleInput.value.trim() || "Untitled Report") : "Untitled Report";
-            const content = column.innerHTML;
+            const content = getReportContentWithSnapshot(column);
             const webhookInput = document.getElementById('jandi-webhook');
             const webhook_url = webhookInput ? webhookInput.value.trim() : "";
 
@@ -2646,6 +2968,7 @@
                     }
 
                     openReportPanel();
+                    refreshReportSnapshotCard();
 
                     // 🔥 차트 복원 실행
                     restoreReportCharts();
@@ -2721,12 +3044,33 @@
                 alert('다운로드할 리포트가 없습니다.');
                 return;
             }
+            let staging = null;
             try {
-                const canvas = await html2canvas(container, {
+                const captureRoot = container.cloneNode(true);
+                const captureCol = captureRoot.querySelector('.report-column');
+                if (captureCol) {
+                    captureCol.querySelectorAll('.report-snapshot-block').forEach(el => el.remove());
+                    captureCol.insertAdjacentHTML('afterbegin', buildReportSnapshotBlockHtml());
+                }
+
+                staging = document.createElement('div');
+                staging.style.position = 'fixed';
+                staging.style.left = '-99999px';
+                staging.style.top = '0';
+                staging.style.background = '#fff';
+                staging.style.zIndex = '-1';
+                staging.appendChild(captureRoot);
+                document.body.appendChild(staging);
+
+                const canvas = await html2canvas(captureRoot, {
                     backgroundColor: '#ffffff',
                     scale: 2,
                     useCORS: true
                 });
+                if (staging && staging.parentNode) {
+                    staging.parentNode.removeChild(staging);
+                    staging = null;
+                }
                 const imageUrl = canvas.toDataURL('image/png');
                 const titleInput = document.getElementById('report-title');
                 const title = titleInput ? (titleInput.value.trim() || "report") : "report";
@@ -2742,6 +3086,9 @@
             } catch (err) {
                 console.error('Download image error:', err);
                 alert('다운로드 중 오류가 발생했습니다.');
+                if (staging && staging.parentNode) {
+                    staging.parentNode.removeChild(staging);
+                }
             }
         }
         function askDownloadFilename(defaultName, ext, promptText) {
