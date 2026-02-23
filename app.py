@@ -311,6 +311,7 @@ def _is_no_data_or_no_match_response(resp: Any) -> bool:
         "질문 의도는 이해했지만",
         "0개 블록 분석 완료",
         "데이터를 찾을 수 없",
+        "이전 분석 결과가 존재하지 않습니다",
     ]
     return any(p in msg for p in bad_patterns)
 
@@ -2159,6 +2160,27 @@ def ask_question():
                     response = response2
 
         response = _apply_bad_regression_guard(user_id=user_id, question=question, response=response)
+        # guardrail이 과개입해 확인 질문으로 끝난 경우, 실행 가능한 표준 질의로 1회 자동 보정
+        try:
+            body_after_guard = response.get("response") if isinstance(response, dict) and isinstance(response.get("response"), dict) else response
+            status_after_guard = str((body_after_guard or {}).get("status", "")).lower() if isinstance(body_after_guard, dict) else ""
+            if status_after_guard == "clarify":
+                ga_retry_q = _rewrite_ga_question_for_retry(question)
+                if ga_retry_q and ga_retry_q != question:
+                    logging.info(f"[Ask] Guardrail clarify retry: {question} -> {ga_retry_q}")
+                    response2 = handle_question(
+                        ga_retry_q,
+                        property_id=property_id,
+                        file_path=file_path,
+                        user_id=user_id,
+                        conversation_id=conversation_id,
+                        semantic=semantic,
+                        beginner_mode=bool(session.get("beginner_mode", False))
+                    )
+                    if not _is_ga_no_match_response(response2):
+                        response = response2
+        except Exception as e:
+            logging.warning(f"[Ask] guardrail clarify retry skipped: {e}")
 
         
         logging.info(f"[Ask] Response Keys: {response.keys() if isinstance(response, dict) else 'Not Dict'}")
