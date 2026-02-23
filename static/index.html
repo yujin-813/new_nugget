@@ -1195,6 +1195,7 @@
             <button id="connect-data-btn" class="primary-btn" onclick="openConnectModal()">Connect Data</button>
         </div>
         <div class="navbar-right">
+            <button id="new-chat-btn" class="outline-btn" onclick="startNewConversation()">새 대화</button>
             <button id="report-toggle-btn" class="outline-btn" onclick="toggleReportPanel()">리포트 열기</button>
             <button id="logout-button" class="outline-btn" onclick="logout()">Logout</button>
         </div>
@@ -2945,6 +2946,25 @@
                 console.error('Edit block error:', err);
                 contentDiv.innerHTML = originalContent;
                 alert('편집 중 오류가 발생했습니다.');
+            }
+        }
+
+        async function startNewConversation() {
+            try {
+                const res = await fetch('/new_conversation', { method: 'POST' });
+                const data = await res.json();
+                if (!res.ok || !data.success) {
+                    alert('새 대화를 시작하지 못했습니다.');
+                    return;
+                }
+                const chat = document.getElementById('chat');
+                if (chat) chat.innerHTML = '';
+                lastAskedQuestion = '';
+                lastKnownPeriodText = '';
+                appendMessage('bot', data.message || '새 대화를 시작했어요.');
+            } catch (e) {
+                console.error(e);
+                alert('새 대화 시작 중 오류가 발생했습니다.');
             }
         }
 

@@ -1650,12 +1650,38 @@ def ensure_new_conversation():
     old_id = session.get('conversation_id')
     new_id = str(uuid.uuid4())
     session['conversation_id'] = new_id
+
+    # 대화 전환 시 임시 상태/후속질문/직전응답은 반드시 초기화
+    for key in [
+        "pending_source_choice",
+        "pending_file_switch",
+        "pending_clarify",
+        "last_followup_suggestions",
+        "last_user_question",
+        "last_response",
+    ]:
+        session.pop(key, None)
     
     property_id = session.get("property_id")
     file_path = session.get("preprocessed_data_path") or session.get("uploaded_file_path")
     
     DBManager.save_conversation_record(new_id, session.get('user_id'), property_id, file_path)
     app.logger.info(f"Conversation rotated: {old_id} -> {new_id}")
+
+
+@app.route('/new_conversation', methods=['POST'])
+def new_conversation():
+    """Start a fresh conversation context without mixing previous chat state."""
+    try:
+        ensure_new_conversation()
+        return jsonify({
+            "success": True,
+            "conversation_id": session.get("conversation_id"),
+            "message": "새 대화를 시작했어요. 이전 맥락은 이번 질문에 반영하지 않습니다."
+        })
+    except Exception as e:
+        app.logger.error(f"Failed to create new conversation: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
 
 def refresh_credentials(credentials):
     request_ = google.auth.transport.requests.Request()
@@ -2162,6 +2188,19 @@ def ask_question():
 
         if not question:
             return jsonify({"error": "Question is required"}), 400
+
+        # 사용자가 새 대화를 명시하면 즉시 맥락 분리
+        ql = question.lower()
+        if any(k in ql for k in ["새 대화", "새로운 대화", "대화 초기화", "새로 시작", "new chat", "reset chat"]):
+            ensure_new_conversation()
+            return jsonify({
+                "response": {
+                    "message": "새 대화를 시작했어요. 이전 대화 맥락 없이 다시 분석할게요.",
+                    "plot_data": [],
+                    "followup_suggestions": ["지난주 요약 알려줘", "채널별 사용자 수 알려줘", "상품별 매출 TOP 10 보여줘"]
+                },
+                "route": "system"
+            })
 
         # 일반 대화/비분석 질문은 친절한 시스템 응답으로 처리
         if _is_general_chat_text(question):
