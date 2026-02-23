@@ -25,6 +25,7 @@
             --chat-width: 45%;
             --report-width: 38%;
             --navbar-height: 60px;
+            --mobile-bottom-nav-height: 64px;
         }
 
         /* ... (skip unchanged styles) ... */
@@ -172,6 +173,25 @@
 
         .outline-btn:hover {
             background: rgba(255, 255, 255, 0.1);
+        }
+
+        .mobile-backdrop {
+            position: fixed;
+            inset: var(--navbar-height) 0 0 0;
+            background: rgba(10, 14, 22, 0.38);
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.2s ease;
+            z-index: 1450;
+        }
+
+        .mobile-backdrop.active {
+            opacity: 1;
+            pointer-events: auto;
+        }
+
+        .mobile-bottom-nav {
+            display: none;
         }
 
         /* Workspace Layout */
@@ -708,19 +728,32 @@
                 flex-direction: column;
                 overflow: visible;
                 min-height: calc(100vh - var(--navbar-height));
+                padding-bottom: var(--mobile-bottom-nav-height);
             }
 
             .sidebar {
-                width: 100% !important;
+                width: min(86vw, 360px) !important;
                 min-width: 0;
-                border-right: none;
-                border-bottom: 1px solid var(--border-color);
-                max-height: 34vh;
+                border-right: 1px solid var(--border-color);
+                border-bottom: none;
+                max-height: none;
+                position: fixed;
+                top: var(--navbar-height);
+                left: 0;
+                bottom: var(--mobile-bottom-nav-height);
+                transform: translateX(-105%);
+                z-index: 1600;
+                box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+                transition: transform 0.24s ease;
+            }
+
+            .sidebar.mobile-open {
+                transform: translateX(0);
             }
 
             .chat-main {
                 width: 100% !important;
-                min-height: 58vh;
+                min-height: calc(100vh - var(--navbar-height) - var(--mobile-bottom-nav-height));
                 border-right: none;
             }
 
@@ -752,8 +785,8 @@
                 top: var(--navbar-height);
                 left: 0;
                 right: 0;
-                bottom: 0;
-                z-index: 1500;
+                bottom: var(--mobile-bottom-nav-height);
+                z-index: 1700;
                 transform: translateY(100%);
                 transition: transform 0.25s ease;
             }
@@ -777,6 +810,47 @@
 
             .input-wrapper {
                 max-width: 100%;
+            }
+
+            .navbar-left .status-badge {
+                font-size: 11px;
+                padding: 3px 8px;
+            }
+
+            #logout-button {
+                display: none;
+            }
+
+            .mobile-bottom-nav {
+                display: grid;
+                grid-template-columns: repeat(4, 1fr);
+                position: fixed;
+                left: 0;
+                right: 0;
+                bottom: 0;
+                height: var(--mobile-bottom-nav-height);
+                border-top: 1px solid #d7e1f1;
+                background: rgba(255, 255, 255, 0.96);
+                backdrop-filter: blur(6px);
+                z-index: 1800;
+            }
+
+            .mobile-tab-btn {
+                border: none;
+                background: transparent;
+                color: #4f607d;
+                font-size: 12px;
+                font-weight: 700;
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                justify-content: center;
+                gap: 3px;
+                cursor: pointer;
+            }
+
+            .mobile-tab-btn.active {
+                color: var(--primary-color);
             }
         }
 
@@ -1064,6 +1138,7 @@
             <button id="logout-button" class="outline-btn" onclick="logout()">Logout</button>
         </div>
     </div>
+    <div id="mobile-backdrop" class="mobile-backdrop" onclick="closeMobileOverlays()"></div>
 
     <div class="workspace">
         <div class="sidebar" id="sidebar">
@@ -1257,6 +1332,12 @@
             </div>
         </div>
     </div>
+    <div class="mobile-bottom-nav">
+        <button id="mobile-nav-menu" class="mobile-tab-btn" onclick="toggleSidebar()"><i class="fas fa-folder-open"></i><span>탐색</span></button>
+        <button id="mobile-nav-chat" class="mobile-tab-btn active" onclick="closeMobileOverlays()"><i class="fas fa-comments"></i><span>대화</span></button>
+        <button id="mobile-nav-report" class="mobile-tab-btn" onclick="toggleReportPanel()"><i class="fas fa-file-alt"></i><span>리포트</span></button>
+        <button id="mobile-nav-connect" class="mobile-tab-btn" onclick="openConnectModal()"><i class="fas fa-plug"></i><span>연결</span></button>
+    </div>
 
     <!-- Data Connect Modal -->
     <div class="modal-overlay" id="connect-modal">
@@ -1342,6 +1423,7 @@
             renderOnboardingInsights();
             refreshReportSnapshotCard();
             syncResponsiveLayoutMetrics();
+            updateMobileDockState();
 
             const panel = document.getElementById('report-panel');
             panel.classList.add('collapsed');
@@ -1374,6 +1456,14 @@
             if (!nav) return;
             const navHeight = Math.max(60, nav.offsetHeight || 60);
             document.documentElement.style.setProperty('--navbar-height', `${navHeight}px`);
+            if (!isMobileViewport()) {
+                document.getElementById('sidebar')?.classList.remove('mobile-open');
+                document.getElementById('mobile-backdrop')?.classList.remove('active');
+            }
+        }
+
+        function isMobileViewport() {
+            return window.matchMedia('(max-width: 1024px)').matches;
         }
         window.addEventListener('resize', syncResponsiveLayoutMetrics);
 
@@ -1381,17 +1471,58 @@
 
 
         function toggleSidebar() {
-            document.getElementById('sidebar').classList.toggle('collapsed');
+            const sidebar = document.getElementById('sidebar');
+            if (!sidebar) return;
+            if (isMobileViewport()) {
+                const willOpen = !sidebar.classList.contains('mobile-open');
+                sidebar.classList.toggle('mobile-open', willOpen);
+                const panel = document.getElementById('report-panel');
+                if (willOpen) panel?.classList.add('collapsed');
+                document.getElementById('mobile-backdrop')?.classList.toggle('active', willOpen);
+                updateMobileDockState();
+                return;
+            }
+            sidebar.classList.toggle('collapsed');
         }
 
         function toggleReportPanel() {
             const panel = document.getElementById('report-panel');
+            if (!panel) return;
+            if (isMobileViewport()) {
+                const willOpen = panel.classList.contains('collapsed');
+                panel.classList.toggle('collapsed', !willOpen);
+                document.getElementById('sidebar')?.classList.remove('mobile-open');
+                document.getElementById('mobile-backdrop')?.classList.toggle('active', willOpen);
+                updateMobileDockState();
+                return;
+            }
             panel.classList.toggle('collapsed');
 
             const btn = document.getElementById("report-toggle-btn");
             if (btn) {
                 btn.innerText = panel.classList.contains("collapsed") ? "리포트 열기" : "리포트 닫기";
             }
+        }
+
+        function closeMobileOverlays() {
+            if (!isMobileViewport()) return;
+            document.getElementById('sidebar')?.classList.remove('mobile-open');
+            document.getElementById('report-panel')?.classList.add('collapsed');
+            document.getElementById('mobile-backdrop')?.classList.remove('active');
+            updateMobileDockState();
+        }
+
+        function updateMobileDockState() {
+            if (!isMobileViewport()) return;
+            const menuBtn = document.getElementById('mobile-nav-menu');
+            const chatBtn = document.getElementById('mobile-nav-chat');
+            const reportBtn = document.getElementById('mobile-nav-report');
+            const sidebarOpen = document.getElementById('sidebar')?.classList.contains('mobile-open');
+            const reportOpen = !document.getElementById('report-panel')?.classList.contains('collapsed');
+            [menuBtn, chatBtn, reportBtn].forEach(btn => btn?.classList.remove('active'));
+            if (sidebarOpen) menuBtn?.classList.add('active');
+            else if (reportOpen) reportBtn?.classList.add('active');
+            else chatBtn?.classList.add('active');
         }
 
 
