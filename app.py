@@ -130,7 +130,8 @@ def _is_general_chat_text(text: str) -> bool:
     # 데이터 질의 신호가 있으면 일반대화로 보지 않음
     data_tokens = [
         "매출", "수익", "사용자", "세션", "전환", "이벤트", "클릭", "구매",
-        "채널", "소스", "매체", "기간", "지난주", "지난달", "이번주", "이번달",
+        "채널", "소스", "매체", "유입", "경로", "트래픽", "분석", "요약",
+        "기간", "지난주", "지난달", "이번주", "이번달",
         "비교", "추이", "top", "상위", "ga4", "파일", "csv", "xlsx"
     ]
     if any(t in q for t in data_tokens):
@@ -139,7 +140,7 @@ def _is_general_chat_text(text: str) -> bool:
         "바보", "멍청", "왜이래", "왜 이래", "욕", "짜증", "화나", "말투",
         "고마워", "감사", "안녕", "help", "도움", "사용법", "어떻게"
     ]
-    return any(t in q for t in chat_tokens) or len(q) <= 8
+    return any(t in q for t in chat_tokens)
 
 
 def _is_summary_request(text: str) -> bool:
