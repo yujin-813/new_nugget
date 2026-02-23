@@ -2478,7 +2478,8 @@
             const chat = document.getElementById('chat');
             const botDiv = document.createElement('div');
             botDiv.className = 'message bot-message';
-            botDiv.innerHTML = `<p><strong>Bot:</strong> ${data.message}</p>`;
+            const clarifyMsg = (data && data.message) ? String(data.message) : '질문 기준을 한 번만 더 알려주시면 바로 분석해드릴게요.';
+            botDiv.innerHTML = `<p><strong>Bot:</strong> ${clarifyMsg}</p>`;
             const options = Array.isArray(data?.options) ? data.options : [];
             if (options.length > 0) {
                 const optionsDiv = document.createElement('div');

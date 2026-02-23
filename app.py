@@ -396,9 +396,19 @@ def _merge_analysis_state(current_state: Dict[str, Any], delta: Dict[str, Any]) 
     metric_override = str(d.get("metric_override") or "").strip()
     q_raw = str(d.get("raw") or "").strip()
 
-    # 원인 분석은 기본적으로 현재 컨텍스트 유지
+    # 원인 분석/비교는 기본적으로 현재 컨텍스트 유지
+    # 단, 초기 기본 상태에서의 비교 질의는 요청 타입으로 진입 허용
+    default_like = (
+        st.get("analysis_type") == "summary"
+        and (st.get("metrics") or []) == ["activeUsers"]
+        and not (st.get("dimensions") or [])
+        and not bool(st.get("asked_queries"))
+    )
     if requested_type and not cause:
-        st["analysis_type"] = requested_type
+        if compare and not default_like:
+            pass
+        else:
+            st["analysis_type"] = requested_type
 
     if requested_period:
         s, e = _period_symbol_to_range(requested_period)
@@ -506,6 +516,16 @@ def _build_query_from_analysis_state(original_question: str, state: Dict[str, An
         return f"{period_prefix}{metric_ui}를 유지하고 원인 분석해줘. sessions, engagementRate, conversionRate도 함께 보여줘".strip()
 
     if atype == "summary":
+        is_explicit_summary = any(k in q.lower() for k in ["요약", "정리", "브리핑", "한눈", "summary"])
+        # 비교 요청은 새 분석으로 점프하지 않고, 현재 상태(metric/dimension)를 유지한 비교를 우선
+        if compare and not is_explicit_summary:
+            if compare and st.get("period", {}).get("symbol") == "last_week":
+                if dim_label:
+                    return f"지난주와 그 전주 {dim_label} {metric_ui}를 비교해 현재값, 이전값, 증감, 증감률을 보여줘".strip()
+                return f"지난주와 그 전주 {metric_ui}를 비교해 현재값, 이전값, 증감, 증감률을 보여줘".strip()
+            if dim_label:
+                return f"{period_prefix}{dim_label} {metric_ui}를 이전 기간과 비교해 현재값, 이전값, 증감, 증감률을 보여줘".strip()
+            return f"{period_prefix}{metric_ui}를 이전 기간과 비교해 현재값, 이전값, 증감, 증감률을 보여줘".strip()
         if compare and st.get("period", {}).get("symbol") == "last_week":
             return "지난주와 그 전주 활성 사용자 수, 구매 수익, 이벤트 TOP 10을 비교 요약해줘"
         if compare:
@@ -725,10 +745,39 @@ def _ensure_compare_output_structure(body: Dict[str, Any], question: str) -> Dic
     if not any(k in q for k in ["비교", "대비", "증감", "이전 기간"]):
         return body
     msg = str(body.get("message", ""))
-    if "증감률" in msg and "이전 기간" in msg:
+    has_required_fields = all(k in msg for k in ["현재값", "이전값", "증감", "증감률"])
+    if has_required_fields:
         return body
     rows = body.get("raw_data")
-    if not (isinstance(rows, list) and len(rows) >= 2 and isinstance(rows[0], dict)):
+    if not (isinstance(rows, list) and len(rows) >= 1 and isinstance(rows[0], dict)):
+        return body
+
+    # 이미 계산 컬럼이 있으면 이를 우선 사용
+    sample = rows[0]
+    if "current" in sample and "previous" in sample:
+        cur_val = _to_number(sample.get("current"))
+        prev_val = _to_number(sample.get("previous"))
+        diff = _to_number(sample.get("change"))
+        pct = _to_number(sample.get("change_pct"))
+        if cur_val is not None and prev_val is not None:
+            if diff is None:
+                diff = cur_val - prev_val
+            if pct is None:
+                pct = None if prev_val == 0 else (diff / prev_val) * 100.0
+            pct_txt = "비교 불가" if pct is None else f"{pct:+.1f}%"
+            table = (
+                f"비교 표:\n"
+                f"| 항목 | 값 |\n"
+                f"|---|---:|\n"
+                f"| 현재값 | {cur_val:,.0f} |\n"
+                f"| 이전값 | {prev_val:,.0f} |\n"
+                f"| 증감 | {diff:+,.0f} |\n"
+                f"| 증감률 | {pct_txt} |"
+            )
+            body["message"] = (msg.strip() + "\n" + table).strip()
+            return body
+
+    if len(rows) < 2:
         return body
 
     def _pick_metric_key(sample: Dict[str, Any]) -> str:
@@ -752,15 +801,14 @@ def _ensure_compare_output_structure(body: Dict[str, Any], question: str) -> Dic
         return body
     diff = cur_val - prev_val
     pct = None if prev_val == 0 else (diff / prev_val) * 100.0
-    diff_txt = f"{diff:,.0f}"
     pct_txt = "비교 불가" if pct is None else f"{pct:+.1f}%"
     table = (
         f"비교 표:\n"
-        f"| 구분 | 값 |\n"
+        f"| 항목 | 값 |\n"
         f"|---|---:|\n"
-        f"| 이전 기간 | {prev_val:,.0f} |\n"
-        f"| 현재 기간 | {cur_val:,.0f} |\n"
-        f"| 증감 | {diff_txt} |\n"
+        f"| 현재값 | {cur_val:,.0f} |\n"
+        f"| 이전값 | {prev_val:,.0f} |\n"
+        f"| 증감 | {diff:+,.0f} |\n"
         f"| 증감률 | {pct_txt} |"
     )
     body["message"] = (msg.strip() + "\n" + table).strip()
@@ -2619,6 +2667,141 @@ def _direct_ga_revenue_compare_fallback(question: str, property_id: str) -> Dict
         return None
 
 
+def _direct_ga_state_compare_fallback(question: str, property_id: str, state: Dict[str, Any]) -> Dict[str, Any] | None:
+    q = (question or "").lower()
+    if not property_id or 'credentials' not in session:
+        return None
+    st = _coerce_analysis_state(state)
+    has_compare = any(k in q for k in ["비교", "대비", "증감", "차이", "전주", "전월", "vs"])
+    if not (has_compare or bool(st.get("comparison"))):
+        return None
+
+    try:
+        period_current = str((st.get("period") or {}).get("current") or "").strip()
+        period_previous = str((st.get("period") or {}).get("previous") or "").strip()
+        if not period_current:
+            ps = _period_symbol_from_question(question)
+            if ps:
+                s, e = _period_symbol_to_range(ps)
+                period_current = f"{s} ~ {e}"
+            else:
+                s, e = _resolve_summary_date_range(question)
+                period_current = f"{s} ~ {e}"
+        if not period_previous:
+            period_previous = _previous_period_range(period_current)
+
+        cur_start, cur_end = [x.strip() for x in period_current.split("~", 1)]
+        prev_start, prev_end = [x.strip() for x in period_previous.split("~", 1)]
+
+        metric = str((_metric_override_from_question(question) or ((st.get("metrics") or ["activeUsers"])[0])) or "activeUsers")
+        if metric not in GA4_METRICS:
+            metric = "activeUsers"
+        metric_ui = GA4_METRICS.get(metric, {}).get("ui_name") or metric
+
+        dim = str(((st.get("dimensions") or [""])[0]) or "")
+        # 비교 질문에서 차원을 지정하지 않으면 총합 비교 허용
+        if not _analysis_dimension_modifier(question):
+            if any(k in q for k in ["전체", "총합", "합계", "total"]) or dim in {"", "none"}:
+                dim = ""
+            elif st.get("analysis_type") == "summary":
+                dim = ""
+
+        dims = [{"name": dim}] if dim else []
+        m = [{"name": metric}]
+        cur_df = get_traffic_data(dims, m, cur_start, cur_end, property_id)
+        prev_df = get_traffic_data(dims, m, prev_start, prev_end, property_id)
+        if cur_df.empty and prev_df.empty:
+            return None
+
+        if not dim:
+            cur_val = float(cur_df.iloc[0].get(metric, 0) or 0) if not cur_df.empty else 0.0
+            prev_val = float(prev_df.iloc[0].get(metric, 0) or 0) if not prev_df.empty else 0.0
+            diff = cur_val - prev_val
+            pct = None if prev_val == 0 else (diff / prev_val) * 100.0
+            pct_txt = "비교 불가(이전값 0)" if pct is None else f"{pct:+.1f}%"
+            msg = (
+                f"비교 결과를 정리했어요.\n"
+                f"- 현재값({cur_start} ~ {cur_end}): {cur_val:,.0f}\n"
+                f"- 이전값({prev_start} ~ {prev_end}): {prev_val:,.0f}\n"
+                f"- 증감: {diff:+,.0f}\n"
+                f"- 증감률: {pct_txt}"
+            )
+            return {
+                "route": "ga4",
+                "response": {
+                    "message": msg,
+                    "period": f"{cur_start} ~ {cur_end}",
+                    "plot_data": {
+                        "type": "bar",
+                        "labels": ["이전값", "현재값"],
+                        "series": [{"name": metric_ui, "data": [prev_val, cur_val]}]
+                    },
+                    "raw_data": [{
+                        "metric": metric_ui,
+                        "previous": round(prev_val, 2),
+                        "current": round(cur_val, 2),
+                        "change": round(diff, 2),
+                        "change_pct": None if pct is None else round(pct, 2),
+                    }],
+                    "followup_suggestions": _build_followups_from_state(st, question)
+                }
+            }
+
+        # 차원 비교: 동일 키로 현재/이전 병합
+        label_key = dim
+        cur_map: Dict[str, float] = {}
+        prev_map: Dict[str, float] = {}
+        for _, r in cur_df.iterrows():
+            k = str(r.get(label_key, "(not set)") or "(not set)")
+            cur_map[k] = cur_map.get(k, 0.0) + float(r.get(metric, 0) or 0)
+        for _, r in prev_df.iterrows():
+            k = str(r.get(label_key, "(not set)") or "(not set)")
+            prev_map[k] = prev_map.get(k, 0.0) + float(r.get(metric, 0) or 0)
+        all_keys = sorted(set(cur_map.keys()) | set(prev_map.keys()), key=lambda x: cur_map.get(x, 0.0), reverse=True)
+        rows = []
+        for k in all_keys:
+            c = float(cur_map.get(k, 0.0))
+            p = float(prev_map.get(k, 0.0))
+            d = c - p
+            pp = None if p == 0 else (d / p) * 100.0
+            rows.append({
+                label_key: k,
+                "previous": round(p, 2),
+                "current": round(c, 2),
+                "change": round(d, 2),
+                "change_pct": None if pp is None else round(pp, 2),
+            })
+        rows = rows[:10]
+        dim_ui = _dimension_label(dim).replace("별", "")
+        top = rows[0] if rows else {label_key: "-", "current": 0, "previous": 0, "change": 0, "change_pct": None}
+        top_pct = "비교 불가" if top.get("change_pct") is None else f"{float(top['change_pct']):+.1f}%"
+        msg = (
+            f"{dim_ui} 기준 비교를 정리했어요.\n"
+            f"- 기준 기간: {cur_start} ~ {cur_end}\n"
+            f"- 비교 기간: {prev_start} ~ {prev_end}\n"
+            f"- 1위 항목: {top.get(label_key, '-')}\n"
+            f"- 현재값: {float(top.get('current', 0)):,.0f} | 이전값: {float(top.get('previous', 0)):,.0f}\n"
+            f"- 증감: {float(top.get('change', 0)):+,.0f} | 증감률: {top_pct}"
+        )
+        return {
+            "route": "ga4",
+            "response": {
+                "message": msg,
+                "period": f"{cur_start} ~ {cur_end}",
+                "plot_data": {
+                    "type": "bar",
+                    "labels": [str(r.get(label_key, "-")) for r in rows],
+                    "series": [{"name": f"{metric_ui}(현재값)", "data": [float(r.get("current", 0) or 0) for r in rows]}]
+                },
+                "raw_data": rows,
+                "followup_suggestions": _build_followups_from_state(st, question)
+            }
+        }
+    except Exception as e:
+        logging.warning(f"[Ask] direct ga state compare fallback failed: {e}")
+        return None
+
+
 def _build_period_summary_via_simple_queries(
     question: str,
     property_id: str,
@@ -3244,6 +3427,13 @@ def ask_question():
             response = _direct_ga_revenue_compare_fallback(
                 question=original_question,
                 property_id=property_id
+            )
+        # 비교 질의는 상태 기반으로 총합/차원 비교를 자동 생성
+        if response is None and property_id:
+            response = _direct_ga_state_compare_fallback(
+                question=original_question,
+                property_id=property_id,
+                state=analysis_state
             )
         # 사용자 추이 질의도 전용 폴백 우선
         if response is None and property_id:

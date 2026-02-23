@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.9.6 - 2026-02-23
+- Fixed comparison-intent handling for ambiguous follow-up queries:
+- Comparison requests now preserve current analysis context and set `comparison=true` instead of reclassifying analysis type.
+- Added state-based GA4 comparison fallback:
+- If compare intent is detected, the engine now auto-computes same-length previous period and returns executable compare output.
+- Enabled total comparison without dimension:
+- Even when no dimension is provided, compare response returns total values.
+- Enforced compare output fields:
+- Compare responses now include `현재값`, `이전값`, `증감`, `증감률` consistently.
+- Clarify-message safety improved:
+- Clarify UI now has a safe fallback message to prevent empty bot text.
+
 ## v0.9.5 - 2026-02-23
 - Fixed follow-up misclassification for summary queries:
 - `지난주 요약` style questions are now treated as new analysis (not stale follow-up).
