@@ -1823,6 +1823,57 @@ def _direct_ga_summary_fallback(question: str, property_id: str) -> Dict[str, An
         logging.warning(f"[Ask] direct ga summary fallback failed: {e}")
         return None
 
+
+def _build_period_summary_via_simple_queries(
+    question: str,
+    property_id: str,
+    file_path: str,
+    user_id: str,
+    conversation_id: str,
+    semantic: Any,
+    beginner_mode: bool
+) -> Dict[str, Any] | None:
+    period = _extract_period_prefix(question)
+    summary_queries = [
+        f"{period}활성 사용자 수 알려줘".strip(),
+        f"{period}구매 수익 알려줘".strip(),
+        f"{period}이벤트 TOP 10 보여줘".strip(),
+    ]
+    summary_parts: List[str] = []
+    for sq in summary_queries:
+        try:
+            sr = handle_question(
+                sq,
+                property_id=property_id,
+                file_path=file_path,
+                user_id=user_id,
+                conversation_id=f"{conversation_id}:summary_entry:{uuid.uuid4().hex[:8]}",
+                semantic=semantic,
+                beginner_mode=bool(beginner_mode)
+            )
+            if _is_ga_no_match_response(sr):
+                continue
+            sb = sr.get("response") if isinstance(sr, dict) and isinstance(sr.get("response"), dict) else sr
+            smsg = str((sb or {}).get("message", "")).strip() if isinstance(sb, dict) else ""
+            if smsg:
+                summary_parts.append(smsg.splitlines()[0])
+        except Exception:
+            continue
+    if len(summary_parts) >= 2:
+        return {
+            "route": "ga4",
+            "response": {
+                "message": "핵심: 지난주 요약을 정리했어요.\n- " + "\n- ".join(summary_parts[:3]),
+                "plot_data": [],
+                "followup_suggestions": [
+                    "지난주 요약을 채널별로 나눠서 보여줘",
+                    "지난주 사용자 추이를 일별로 보여줘",
+                    "지난주 구매 수익을 이전 기간과 비교해줘"
+                ]
+            }
+        }
+    return None
+
 @app.route("/list_all")
 def list_all():
     try:
@@ -2280,7 +2331,8 @@ def get_preprocessed_data():
 def ask_question():
     try:
         data = request.get_json()
-        question = (data.get('question') or "").strip()
+        original_question = (data.get('question') or "").strip()
+        question = original_question
         question = _normalize_summary_request(question)
         beginner_mode = bool(data.get("beginner_mode", False))
         session["beginner_mode"] = beginner_mode
@@ -2345,6 +2397,21 @@ def ask_question():
             session['conversation_id'] = str(uuid.uuid4())
             conversation_id = session['conversation_id']
 
+        # 요약 질의는 일반 파서 실패를 줄이기 위해 시작점에서 전용 경로 우선 처리
+        response = None
+        if _is_summary_request(original_question) and _is_likely_ga_data_question(original_question) and property_id:
+            response = _build_period_summary_via_simple_queries(
+                question=original_question,
+                property_id=property_id,
+                file_path=file_path,
+                user_id=user_id,
+                conversation_id=conversation_id,
+                semantic=semantic,
+                beginner_mode=bool(session.get("beginner_mode", False))
+            )
+            if not response:
+                response = _direct_ga_summary_fallback(question=original_question, property_id=property_id)
+
         # 사용자 부정 피드백(틀림/이상) 자동 수집
         if _is_negative_feedback_text(question):
             prev_question = session.get("last_user_question")
@@ -2373,15 +2440,16 @@ def ask_question():
         # 🔥 handle_question에 user_id와 conversation_id 추가 전달
         logging.info(f"[Ask] Question: {question}, Prop: {property_id}, File: {file_path}")
         
-        response = handle_question(
-            question,
-            property_id=property_id,
-            file_path=file_path,
-            user_id=user_id,
-            conversation_id=conversation_id,
-            semantic=semantic,
-            beginner_mode=bool(session.get("beginner_mode", False))
-        )
+        if response is None:
+            response = handle_question(
+                question,
+                property_id=property_id,
+                file_path=file_path,
+                user_id=user_id,
+                conversation_id=conversation_id,
+                semantic=semantic,
+                beginner_mode=bool(session.get("beginner_mode", False))
+            )
 
         # 추천 질문 클릭 시 "매칭 실패"면 컨텍스트를 붙여 1회 자동 재시도
         if is_followup_selected and _is_no_data_or_no_match_response(response):
