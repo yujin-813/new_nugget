@@ -1855,6 +1855,13 @@ def _direct_ga_user_trend_fallback(question: str, property_id: str) -> Dict[str,
         if trend.empty or "date" not in trend.columns or "activeUsers" not in trend.columns:
             return None
         trend["activeUsers"] = pd.to_numeric(trend["activeUsers"], errors="coerce").fillna(0)
+        # GA4 date(YYYYMMDD) -> YYYY-MM-DD 정규화
+        def _fmt_date(v: Any) -> str:
+            s = str(v or "").strip()
+            if re.match(r"^\d{8}$", s):
+                return f"{s[:4]}-{s[4:6]}-{s[6:8]}"
+            return s
+        trend["date"] = trend["date"].map(_fmt_date)
         trend = trend.sort_values("date")
         first = trend.iloc[0]
         last = trend.iloc[-1]
@@ -1862,17 +1869,32 @@ def _direct_ga_user_trend_fallback(question: str, property_id: str) -> Dict[str,
         last_val = int(last.get("activeUsers", 0))
         diff = last_val - first_val
         diff_txt = f"+{diff:,}" if diff >= 0 else f"{diff:,}"
+        # 일별 라인(최대 14줄)
+        day_lines = []
+        for _, r in trend.head(14).iterrows():
+            d = str(r.get("date", ""))
+            v = int(float(r.get("activeUsers", 0) or 0))
+            day_lines.append(f"- {d}: {v:,}명")
         msg = (
             f"핵심: 지난주 사용자 추이를 확인했어요.\n"
             f"- 시작일 사용자: {first_val:,}명\n"
             f"- 마지막일 사용자: {last_val:,}명\n"
-            f"- 기간 내 변화: {diff_txt}명"
+            f"- 기간 내 변화: {diff_txt}명\n"
+            f"- 일별 데이터:\n" + "\n".join(day_lines)
         )
+        labels = [str(x) for x in trend["date"].tolist()]
+        series_data = [int(float(x or 0)) for x in trend["activeUsers"].tolist()]
         return {
             "route": "ga4",
             "response": {
                 "message": msg,
-                "plot_data": [],
+                "plot_data": {
+                    "type": "line",
+                    "labels": labels,
+                    "series": [
+                        {"name": "활성 사용자", "data": series_data}
+                    ]
+                },
                 "period": f"{start_date} ~ {end_date}",
                 "raw_data": trend.to_dict("records"),
                 "followup_suggestions": [
