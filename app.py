@@ -491,6 +491,99 @@ def _metrics_ui_label(metrics: List[str]) -> str:
     return ", ".join(labels[:3]) if labels else "활성 사용자"
 
 
+def _parse_limit_from_question(question: str, default: int = 10) -> int:
+    q = str(question or "").lower()
+    m = re.search(r"(top\s*|상위\s*|)(\d{1,3})\s*(개|건|명|위)?", q)
+    if m:
+        try:
+            n = int(m.group(2))
+            if 1 <= n <= 200:
+                return n
+        except Exception:
+            pass
+    return default
+
+
+def _parse_sort_from_question(question: str, metrics: List[str]) -> Dict[str, str]:
+    q = str(question or "").lower()
+    field = _dedupe_metrics(metrics or ["activeUsers"])[0]
+    order = "asc" if any(k in q for k in ["오름차순", "낮은", "작은", "asc"]) else "desc"
+    return {"field": field, "order": order}
+
+
+def _infer_query_analysis_type(metrics: List[str], current_type: str = "") -> str:
+    ms = set(_dedupe_metrics(metrics or []))
+    revenue_signals = {"purchaseRevenue", "itemRevenue", "totalRevenue"}
+    if ms & revenue_signals:
+        return "revenue"
+    if current_type in {"acquisition", "revenue"}:
+        return current_type
+    return "acquisition"
+
+
+def _build_query_state(state: Dict[str, Any], question: str) -> Dict[str, Any]:
+    """
+    QueryState (execution state)
+    {
+      analysisType: acquisition | revenue,
+      period: {start, end},
+      dimension?: str,
+      metrics: string[],
+      sort?: {field, order},
+      limit?: number,
+      comparison?: {enabled, previousPeriod:{start,end}}
+    }
+    """
+    st = _coerce_analysis_state(state)
+    cur_start, cur_end, prev_start, prev_end = _resolve_period_ranges_from_state_or_question(st, question)
+
+    requested_metrics = _dedupe_metrics((st.get("metrics") or []) + _metric_overrides_from_question(question))
+    if not requested_metrics:
+        requested_metrics = _metric_defaults_for_analysis(st.get("analysis_type", "acquisition"))
+    analysis_type = _infer_query_analysis_type(requested_metrics, st.get("analysis_type", ""))
+
+    dim = str(((st.get("dimensions") or [""])[0]) or "")
+    req_dim = _analysis_dimension_modifier(question)
+    if req_dim:
+        dim = req_dim
+    if dim == "campaign":
+        dim = _dimension_from_canonical("campaign")
+    elif dim == "keyword":
+        dim = _dimension_from_canonical("keyword")
+
+    sort = _parse_sort_from_question(question, requested_metrics)
+    limit = _parse_limit_from_question(question, default=10)
+    comparison_enabled = bool(st.get("comparison")) or any(k in str(question or "").lower() for k in ["비교", "대비", "증감", "전주", "전월", "vs"])
+
+    return {
+        "analysisType": analysis_type,
+        "period": {"start": cur_start, "end": cur_end},
+        "dimension": dim or None,
+        "metrics": requested_metrics,
+        "sort": sort,
+        "limit": limit,
+        "comparison": {
+            "enabled": comparison_enabled,
+            "previousPeriod": {"start": prev_start, "end": prev_end}
+        }
+    }
+
+
+def _run_query_state(query_state: Dict[str, Any], property_id: str, period_override: Dict[str, str] | None = None) -> pd.DataFrame:
+    period = dict(query_state.get("period") or {})
+    if isinstance(period_override, dict):
+        period.update({k: v for k, v in period_override.items() if k in {"start", "end"}})
+    start_date = str(period.get("start") or "")
+    end_date = str(period.get("end") or "")
+    if not start_date or not end_date:
+        return pd.DataFrame()
+
+    dim = str(query_state.get("dimension") or "")
+    dimensions = [{"name": dim}] if dim else []
+    metric_specs = [{"name": m} for m in _expand_metrics_for_query(query_state.get("metrics") or [])]
+    return get_traffic_data(dimensions, metric_specs, start_date, end_date, property_id)
+
+
 def _parse_state_delta(question: str) -> Dict[str, Any]:
     q = (question or "").strip()
     ql = q.lower()
@@ -535,7 +628,11 @@ def _merge_analysis_state(current_state: Dict[str, Any], delta: Dict[str, Any]) 
         and not bool(st.get("asked_queries"))
     )
     if requested_type and not cause:
-        if compare and not default_like:
+        # dimension swap 요청은 analysis_type 전환 없이 현재 컨텍스트 유지
+        dimension_only_swap = bool(requested_dim) and not bool(metric_overrides)
+        if dimension_only_swap and not default_like:
+            pass
+        elif compare and not default_like:
             pass
         else:
             st["analysis_type"] = requested_type
@@ -2916,32 +3013,40 @@ def _direct_ga_state_compare_fallback(question: str, property_id: str, state: Di
         return None
 
     try:
-        cur_start, cur_end, prev_start, prev_end = _resolve_period_ranges_from_state_or_question(st, question)
-
-        requested_metrics = _dedupe_metrics((st.get("metrics") or []) + _metric_overrides_from_question(question))
-        if not requested_metrics:
-            requested_metrics = ["activeUsers"]
+        query_state = _build_query_state(st, question)
+        requested_metrics = _dedupe_metrics(query_state.get("metrics") or ["activeUsers"])
         base_metrics = _expand_metrics_for_query(requested_metrics)
+        dim = str(query_state.get("dimension") or "")
+        cur_start = str((query_state.get("period") or {}).get("start") or "")
+        cur_end = str((query_state.get("period") or {}).get("end") or "")
+        prev_period = (query_state.get("comparison") or {}).get("previousPeriod") or {}
+        prev_start = str(prev_period.get("start") or "")
+        prev_end = str(prev_period.get("end") or "")
 
-        requested_dim = _analysis_dimension_modifier(question)
-        dim = str(((st.get("dimensions") or [""])[0]) or "")
-        if requested_dim:
-            if requested_dim == "campaign":
-                dim = _next_acquisition_dimension("sourceMedium")
-            else:
-                dim = requested_dim
-
-        # dimension이 없어도 총합 비교를 반드시 허용
-        if not dim or any(k in q for k in ["전체", "총합", "합계", "total"]):
-            dim = ""
-
-        dims = [{"name": dim}] if dim else []
-        metric_specs = [{"name": m} for m in base_metrics]
-        cur_df = get_traffic_data(dims, metric_specs, cur_start, cur_end, property_id)
-        prev_df = get_traffic_data(dims, metric_specs, prev_start, prev_end, property_id)
+        # comparison은 intent가 아니라 실행 전략: 동일 baseQuery를 기간만 바꿔 2회 실행
+        cur_df = _run_query_state(query_state, property_id=property_id)
+        prev_df = _run_query_state(
+            query_state,
+            property_id=property_id,
+            period_override={"start": prev_start, "end": prev_end}
+        )
         if cur_df.empty and prev_df.empty:
             cond_dim = _dimension_label(dim) if dim else "전체(총합)"
             cond_metrics = _metrics_ui_label(requested_metrics)
+            if dim:
+                dim_title = _dimension_label(dim).replace("별", "")
+                metric_title = _metrics_ui_label(requested_metrics)
+                return {
+                    "route": "ga4",
+                    "response": {
+                        "status": "clarify",
+                        "message": f"{dim_title} {metric_title} 데이터가 없습니다. 대신 전체 {metric_title}를 보여드릴까요?",
+                        "options": ["전체로 비교해줘", "기간을 넓혀서 다시 비교해줘"],
+                        "plot_data": [],
+                        "period": f"{cur_start} ~ {cur_end}",
+                        "followup_suggestions": ["전체로 비교해줘", "기간을 넓혀서 다시 비교해줘"]
+                    }
+                }
             return {
                 "route": "ga4",
                 "response": {
@@ -3014,6 +3119,10 @@ def _direct_ga_state_compare_fallback(question: str, property_id: str, state: Di
 
         # 차원 비교: primary metric 기준으로 비교(동일 쿼리 current/previous 2회)
         primary_metric = requested_metrics[0]
+        sort_cfg = query_state.get("sort") or {}
+        sort_field = str(sort_cfg.get("field") or primary_metric)
+        sort_order = str(sort_cfg.get("order") or "desc").lower()
+        limit_n = int(query_state.get("limit") or 10)
         label_key = dim
 
         def _agg(df: pd.DataFrame) -> Dict[str, Dict[str, float]]:
@@ -3028,7 +3137,6 @@ def _direct_ga_state_compare_fallback(question: str, property_id: str, state: Di
         cur_agg = _agg(cur_df)
         prev_agg = _agg(prev_df)
         keys = list(set(cur_agg.keys()) | set(prev_agg.keys()))
-        keys.sort(key=lambda k: float((cur_agg.get(k, {}) or {}).get(base_metrics[0], 0.0)), reverse=True)
 
         rows = []
         for k in keys:
@@ -3047,8 +3155,27 @@ def _direct_ga_state_compare_fallback(question: str, property_id: str, state: Di
                 "change": round(d, 2),
                 "change_pct": None if pp is None else round(pp, 2),
             })
-        rows = rows[:10]
+        reverse = (sort_order != "asc")
+        if sort_field in {"previous", "current", "change", "change_pct"}:
+            rows.sort(key=lambda r: float(_to_number(r.get(sort_field)) or 0.0), reverse=reverse)
+        else:
+            rows.sort(key=lambda r: float(_to_number(r.get("current")) or 0.0), reverse=reverse)
+        rows = rows[:max(1, min(limit_n, 100))]
         if not rows:
+            if dim:
+                dim_title = _dimension_label(dim).replace("별", "")
+                metric_ui = "전환율" if primary_metric == "conversionRate" else (GA4_METRICS.get(primary_metric, {}).get("ui_name") or primary_metric)
+                return {
+                    "route": "ga4",
+                    "response": {
+                        "status": "clarify",
+                        "message": f"{dim_title} {metric_ui} 비교 데이터가 없습니다. 대신 전체 {metric_ui}를 보여드릴까요?",
+                        "options": ["전체로 비교해줘", "기간을 넓혀서 다시 비교해줘"],
+                        "plot_data": [],
+                        "period": f"{cur_start} ~ {cur_end}",
+                        "followup_suggestions": ["전체로 비교해줘", "기간을 넓혀서 다시 비교해줘"]
+                    }
+                }
             return None
 
         metric_ui = "전환율" if primary_metric == "conversionRate" else (GA4_METRICS.get(primary_metric, {}).get("ui_name") or primary_metric)

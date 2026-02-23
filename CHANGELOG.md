@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.9.9 - 2026-02-24
+- Added structured QueryState execution model for GA4 flows:
+- `analysisType`, `period`, `dimension`, `metrics`, `sort`, `limit`, `comparison.previousPeriod`.
+- Comparison execution strategy standardized:
+- current query and previous-period query now run from the same base QueryState (period override only), then diff/rate are post-processed.
+- Dimension swap behavior stabilized:
+- when users request only a new dimension (e.g., `채널별로`), state performs dimension swap without forcing analysis-type switch.
+- Non-silent fallback for dimension-missing data:
+- if dimension-level compare data is missing, response explicitly asks whether to fallback to total compare.
+
 ## v0.9.8 - 2026-02-24
 - Added explicit drill-down hierarchy rules for acquisition analysis:
 - canonical flow: `channel -> source -> campaign -> keyword` (keyword falls back to campaign when metadata is unavailable).
