@@ -146,6 +146,13 @@ def _compose_card_message(message_parts: List[str], quality_warnings: List[str],
             return quality_warnings[0]
         return "요청하신 내용을 확인했어요."
 
+    # 순위/목록형 응답은 축약하지 않고 원문 구조를 최대한 유지
+    joined = "\n".join(parts)
+    if ("상위 목록:" in joined) or re.search(r"(?m)^\s*\d+\.\s+", joined):
+        if quality_warnings:
+            joined = joined + "\n" + f"참고: {quality_warnings[0]}"
+        return joined
+
     conclusion = parts[0]
     evidence = []
     for p in parts[1:]:

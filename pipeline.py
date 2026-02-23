@@ -193,6 +193,10 @@ class GA4Pipeline:
                     metric_candidates = [{"name": "activeUsers", "score": 0.86, "matched_by": "pipeline_trend_default", "scope": "event"}]
                 elif intent == "comparison" and any(k in q for k in ["사용자", "유저", "세션"]):
                     metric_candidates = [{"name": "activeUsers", "score": 0.82, "matched_by": "pipeline_compare_default", "scope": "event"}]
+                elif intent in ["comparison", "metric_multi"] and any(k in q for k in ["매출", "수익", "revenue"]):
+                    metric_candidates = [{"name": "totalRevenue", "score": 0.84, "matched_by": "pipeline_revenue_compare_default", "scope": "event"}]
+                elif any(k in q for k in ["유입", "경로", "채널", "소스", "매체", "트래픽"]):
+                    metric_candidates = [{"name": "activeUsers", "score": 0.80, "matched_by": "pipeline_inflow_default", "scope": "event"}]
             period_terms = [
                 "언제부터", "언제까지", "기간", "몇일부터", "몇일", "from", "to",
                 "기준이야", "기준이야?", "기준인가", "기준이냐", "기준이", "기준은", "기준"
@@ -242,7 +246,7 @@ class GA4Pipeline:
             )
             top_dim_score = dimension_candidates[0].get("score", 0) if dimension_candidates else 0
             has_dimension_signal = bool(dimension_candidates) and top_dim_score >= 0.60
-            if (not metric_candidates and not short_dimension_followup and not short_compare_followup and not has_dimension_signal) or (not has_prev_metrics and top_score < 0.55 and not has_dimension_signal):
+            if (not metric_candidates and not short_dimension_followup and not short_compare_followup and not has_dimension_signal) or (not has_prev_metrics and top_score < 0.45 and not has_dimension_signal):
                 if _looks_explanatory_question(question):
                     return {
                         "status": "ok",

@@ -2094,7 +2094,9 @@
                 else evidence.push(line);
             });
 
-            const evidenceHtml = evidence.slice(0, 3).map(item => `<li>${inline(item)}</li>`).join('');
+            const hasRankedList = lines.some(line => /^\d+\.\s+/.test(line));
+            const evidenceLimit = hasRankedList ? 12 : 3;
+            const evidenceHtml = evidence.slice(0, evidenceLimit).map(item => `<li>${inline(item)}</li>`).join('');
             return `
                 <div class="summary-block">
                     ${core ? `<div class="summary-core">핵심: ${inline(core)}</div>` : ''}
