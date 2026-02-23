@@ -229,6 +229,9 @@ def _make_followup_actionable(followup: str, base_question: str) -> str:
     base = str(base_question or "").strip()
     if not f:
         return ""
+    # 일반 대화 문장을 base로 붙이지 않는다.
+    if _is_general_chat_text(base):
+        return f.replace("볼까요?", "보여줘").replace("해볼까요?", "해줘").replace("드릴까요?", "보여줘")
     # Already actionable
     if any(k in f for k in ["알려줘", "보여줘", "분석해줘", "나눠줘", "비교해줘", "확인해줘"]):
         return f
@@ -442,6 +445,8 @@ def _rewrite_followup_with_context(followup: str, last_user_question: str) -> st
         return f
     if not last_q:
         return f
+    if _is_general_chat_text(last_q):
+        return f
 
     if "채널별" in f:
         return f"{last_q}를 채널별로 나눠서 보여줘"
@@ -459,6 +464,14 @@ def _rewrite_followup_with_context(followup: str, last_user_question: str) -> st
 
 
 def _normalize_followups(route: str, body: Dict[str, Any], current_question: str, last_user_question: str) -> List[str]:
+    if _is_general_chat_text(current_question):
+        return [
+            "지난주 요약 알려줘",
+            "채널별 사용자 수 알려줘",
+            "상품별 매출 TOP 10 보여줘",
+            "파일 구조를 쉽게 설명해줘",
+        ]
+
     raw = body.get("followup_suggestions")
     candidates = [str(x).strip() for x in raw] if isinstance(raw, list) else []
 
