@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.9.7 - 2026-02-24
+- Metrics are now managed as an array in analysis state:
+- `함께/같이/추가` style requests append metrics instead of replacing existing ones.
+- Added derived-metric post-processing layer:
+- `conversionRate` is calculated after query execution from base metrics (`totalPurchasers`, `activeUsers`) to avoid query failures.
+- Comparison flow hardened:
+- Comparison is treated as a state flag (`comparison=true`), not a new intent.
+- Current/previous periods are executed with same query shape, then diff/rate are calculated in post-processing.
+- Compare without dimension is explicitly allowed and handled as total comparison.
+- Failure fallback improved:
+- Instead of silent/empty response, failed data queries now return condition-aware explanation (source/period/dimension/metrics).
+
 ## v0.9.6 - 2026-02-23
 - Fixed comparison-intent handling for ambiguous follow-up queries:
 - Comparison requests now preserve current analysis context and set `comparison=true` instead of reclassifying analysis type.

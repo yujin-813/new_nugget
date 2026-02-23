@@ -351,27 +351,97 @@ def _metric_defaults_for_analysis(analysis_type: str) -> List[str]:
     return ["activeUsers"]
 
 
-def _metric_override_from_question(question: str) -> str:
+def _metric_append_requested(question: str) -> bool:
     q = (question or "").lower()
+    return any(k in q for k in ["함께", "같이", "도 ", "도?", "또", "and", "plus", "추가"])
+
+
+def _dedupe_metrics(metrics: List[str]) -> List[str]:
+    out: List[str] = []
+    for m in [str(x or "").strip() for x in (metrics or [])]:
+        if not m:
+            continue
+        if m not in out:
+            out.append(m)
+    return out[:6]
+
+
+def _metric_overrides_from_question(question: str) -> List[str]:
+    q = (question or "").lower()
+    out: List[str] = []
+
+    def add(m: str):
+        if m and m not in out:
+            out.append(m)
+
+    if any(k in q for k in ["전환율", "conversion rate", "conversionrate"]):
+        add("conversionRate")
     if any(k in q for k in ["매출", "수익", "금액", "revenue"]):
-        return "purchaseRevenue"
+        add("purchaseRevenue")
     if any(k in q for k in ["구매자", "후원자", "purchaser"]):
-        return "totalPurchasers"
-    if any(k in q for k in ["세션"]):
-        return "sessions"
+        add("totalPurchasers")
+    if any(k in q for k in ["세션", "session"]):
+        add("sessions")
     if any(k in q for k in ["이벤트", "클릭", "횟수", "건수", "event"]):
-        return "eventCount"
+        add("eventCount")
     if any(k in q for k in ["사용자", "유저", "명", "user"]):
-        return "activeUsers"
-    return ""
+        add("activeUsers")
+    return _dedupe_metrics(out)
+
+
+def _metric_override_from_question(question: str) -> str:
+    metrics = _metric_overrides_from_question(question)
+    return metrics[0] if metrics else ""
+
+
+def _expand_metrics_for_query(requested_metrics: List[str]) -> List[str]:
+    """
+    Derived metrics are calculated in post-processing to avoid query failures.
+    """
+    base: List[str] = []
+    for m in _dedupe_metrics(requested_metrics or []):
+        if m == "conversionRate":
+            for bm in ["totalPurchasers", "activeUsers"]:
+                if bm not in base:
+                    base.append(bm)
+            continue
+        if m not in base:
+            base.append(m)
+    if not base:
+        base = ["activeUsers"]
+    return _dedupe_metrics(base)
+
+
+def _apply_derived_metrics_to_row(row: Dict[str, Any], requested_metrics: List[str]) -> Dict[str, Any]:
+    out = dict(row or {})
+    req = _dedupe_metrics(requested_metrics or [])
+    if "conversionRate" in req:
+        purchasers = _to_number(out.get("totalPurchasers"))
+        users = _to_number(out.get("activeUsers"))
+        if purchasers is not None and users is not None and users != 0:
+            out["conversionRate"] = (purchasers / users) * 100.0
+        elif "conversionRate" not in out:
+            out["conversionRate"] = None
+    return out
+
+
+def _metrics_ui_label(metrics: List[str]) -> str:
+    labels = []
+    for m in _dedupe_metrics(metrics or []):
+        if m == "conversionRate":
+            labels.append("전환율")
+        else:
+            labels.append(GA4_METRICS.get(m, {}).get("ui_name") or m)
+    return ", ".join(labels[:3]) if labels else "활성 사용자"
 
 
 def _parse_state_delta(question: str) -> Dict[str, Any]:
     q = (question or "").strip()
     ql = q.lower()
-    compare = any(k in ql for k in ["비교", "대비", "증감", "전주", "전월", "vs"])
+    compare = any(k in ql for k in ["비교", "대비", "증감", "증감률", "전주", "전월", "vs"])
     drilldown = any(k in ql for k in ["더 내려", "세분", "드릴다운", "상세", "깊게"])
     cause = any(k in ql for k in ["원인", "이유", "왜", "해석"])
+    metric_overrides = _metric_overrides_from_question(q)
     return {
         "analysis_type": _analysis_type_from_question(q),
         "period_symbol": _period_symbol_from_question(q),
@@ -379,7 +449,9 @@ def _parse_state_delta(question: str) -> Dict[str, Any]:
         "comparison": compare,
         "drilldown": drilldown,
         "cause": cause,
-        "metric_override": _metric_override_from_question(q),
+        "metric_overrides": metric_overrides,
+        "metric_override": metric_overrides[0] if metric_overrides else "",
+        "metric_append": _metric_append_requested(q),
         "raw": q
     }
 
@@ -393,7 +465,9 @@ def _merge_analysis_state(current_state: Dict[str, Any], delta: Dict[str, Any]) 
     compare = bool(d.get("comparison"))
     drilldown = bool(d.get("drilldown"))
     cause = bool(d.get("cause"))
+    metric_overrides = [str(x).strip() for x in (d.get("metric_overrides") or []) if str(x).strip()]
     metric_override = str(d.get("metric_override") or "").strip()
+    metric_append = bool(d.get("metric_append"))
     q_raw = str(d.get("raw") or "").strip()
 
     # 원인 분석/비교는 기본적으로 현재 컨텍스트 유지
@@ -447,10 +521,21 @@ def _merge_analysis_state(current_state: Dict[str, Any], delta: Dict[str, Any]) 
     # metric 유지 원칙: 원인 분석에서는 기존 metric 고정
     if not st["metrics"]:
         st["metrics"] = _metric_defaults_for_analysis(st["analysis_type"])
-    if metric_override and not cause:
-        st["metrics"] = [metric_override]
+    if metric_override and metric_override not in metric_overrides:
+        metric_overrides = [metric_override] + metric_overrides
+    metric_overrides = _dedupe_metrics(metric_overrides)
+
+    if metric_overrides and not cause:
+        # "함께/같이"는 append, 그 외에도 기존 metric을 제거하지 않고 확장
+        merged = list(st.get("metrics") or [])
+        for m in metric_overrides:
+            if m not in merged:
+                merged.append(m)
+        st["metrics"] = _dedupe_metrics(merged)
     elif requested_type and not cause:
-        st["metrics"] = _metric_defaults_for_analysis(st["analysis_type"])
+        # 타입 전환 시에도 비교/확장 맥락이면 기존 metric 유지
+        if not compare and not drilldown and not metric_append:
+            st["metrics"] = _metric_defaults_for_analysis(st["analysis_type"])
 
     # 질문 기록(재추천 금지에 사용)
     if q_raw:
@@ -496,13 +581,15 @@ def _build_query_from_analysis_state(original_question: str, state: Dict[str, An
     q = str(original_question or "").strip()
     st = _coerce_analysis_state(state)
     atype = st["analysis_type"]
-    metric = (st.get("metrics") or ["activeUsers"])[0]
+    metrics = _dedupe_metrics(st.get("metrics") or ["activeUsers"])
+    primary_metric = _expand_metrics_for_query(metrics)[0] if metrics else "activeUsers"
     dim = (st.get("dimensions") or [""])[0]
     period_prefix = _period_prefix_from_state(st)
     compare = bool(st.get("comparison"))
     cause = bool(st.get("cause_analysis"))
 
-    metric_ui = GA4_METRICS.get(metric, {}).get("ui_name") or metric
+    metric_ui = _metrics_ui_label(metrics)
+    primary_metric_ui = GA4_METRICS.get(primary_metric, {}).get("ui_name") or primary_metric
     dim_label = _dimension_label(dim)
 
     # 이미 충분히 구체적인 질의는 그대로 유지
@@ -537,7 +624,7 @@ def _build_query_from_analysis_state(original_question: str, state: Dict[str, An
             return f"지난주와 그 전주 {dim_label} {metric_ui}를 비교해 증감과 증감률을 보여줘".strip()
         if compare:
             return f"{period_prefix}{dim_label} {metric_ui}를 이전 기간과 비교해 증감과 증감률을 보여줘".strip()
-        return f"{period_prefix}{dim_label} {metric_ui}를 보여줘".strip()
+        return f"{period_prefix}{dim_label} {primary_metric_ui if len(metrics) == 1 else metric_ui}를 보여줘".strip()
 
     if atype == "revenue":
         if compare and st.get("period", {}).get("symbol") == "last_week":
@@ -967,6 +1054,42 @@ def _extract_message_from_response(resp: Any) -> str:
         return str(body.get("message", "")) if isinstance(body, dict) else ""
     except Exception:
         return ""
+
+
+def _build_no_data_explained_response(
+    question: str,
+    state: Dict[str, Any],
+    property_id: str = "",
+    file_path: str = ""
+) -> Dict[str, Any]:
+    st = _coerce_analysis_state(state)
+    period = str((st.get("period") or {}).get("current") or "").strip() or "지정 없음"
+    previous = str((st.get("period") or {}).get("previous") or "").strip()
+    dim = (st.get("dimensions") or [""])[0] if isinstance(st.get("dimensions"), list) else ""
+    metrics = _dedupe_metrics(st.get("metrics") or [])
+    dim_txt = _dimension_label(dim) if dim else "전체(총합)"
+    metric_txt = _metrics_ui_label(metrics)
+    source = "GA4" if property_id else ("FILE" if file_path else "미지정")
+    compare_txt = "비교(현재/이전 기간)" if bool(st.get("comparison")) else "단일 기간"
+    period_line = f"{period}"
+    if previous:
+        period_line = f"{period} vs {previous}"
+    msg = (
+        "요청하신 분석을 실행했지만 조건에 맞는 데이터를 찾지 못했어요.\n"
+        f"- 소스: {source}\n"
+        f"- 기간: {period_line} ({compare_txt})\n"
+        f"- 차원: {dim_txt}\n"
+        f"- 지표: {metric_txt}\n"
+        "- 조치: 기간을 넓히거나 차원을 `전체`로 바꿔 다시 시도해 주세요."
+    )
+    return {
+        "route": "ga4" if property_id else ("file" if file_path else "system"),
+        "response": {
+            "message": msg,
+            "plot_data": [],
+            "followup_suggestions": _build_followups_from_state(st, question)
+        }
+    }
 
 
 def _is_no_data_or_no_match_response(resp: Any) -> bool:
@@ -2693,95 +2816,150 @@ def _direct_ga_state_compare_fallback(question: str, property_id: str, state: Di
         cur_start, cur_end = [x.strip() for x in period_current.split("~", 1)]
         prev_start, prev_end = [x.strip() for x in period_previous.split("~", 1)]
 
-        metric = str((_metric_override_from_question(question) or ((st.get("metrics") or ["activeUsers"])[0])) or "activeUsers")
-        if metric not in GA4_METRICS:
-            metric = "activeUsers"
-        metric_ui = GA4_METRICS.get(metric, {}).get("ui_name") or metric
+        requested_metrics = _dedupe_metrics((st.get("metrics") or []) + _metric_overrides_from_question(question))
+        if not requested_metrics:
+            requested_metrics = ["activeUsers"]
+        base_metrics = _expand_metrics_for_query(requested_metrics)
 
+        requested_dim = _analysis_dimension_modifier(question)
         dim = str(((st.get("dimensions") or [""])[0]) or "")
-        # 비교 질문에서 차원을 지정하지 않으면 총합 비교 허용
-        if not _analysis_dimension_modifier(question):
-            if any(k in q for k in ["전체", "총합", "합계", "total"]) or dim in {"", "none"}:
-                dim = ""
-            elif st.get("analysis_type") == "summary":
-                dim = ""
+        if requested_dim:
+            if requested_dim == "campaign":
+                dim = _next_acquisition_dimension("sourceMedium")
+            else:
+                dim = requested_dim
+
+        # dimension이 없어도 총합 비교를 반드시 허용
+        if not dim or any(k in q for k in ["전체", "총합", "합계", "total"]):
+            dim = ""
 
         dims = [{"name": dim}] if dim else []
-        m = [{"name": metric}]
-        cur_df = get_traffic_data(dims, m, cur_start, cur_end, property_id)
-        prev_df = get_traffic_data(dims, m, prev_start, prev_end, property_id)
+        metric_specs = [{"name": m} for m in base_metrics]
+        cur_df = get_traffic_data(dims, metric_specs, cur_start, cur_end, property_id)
+        prev_df = get_traffic_data(dims, metric_specs, prev_start, prev_end, property_id)
         if cur_df.empty and prev_df.empty:
-            return None
-
-        if not dim:
-            cur_val = float(cur_df.iloc[0].get(metric, 0) or 0) if not cur_df.empty else 0.0
-            prev_val = float(prev_df.iloc[0].get(metric, 0) or 0) if not prev_df.empty else 0.0
-            diff = cur_val - prev_val
-            pct = None if prev_val == 0 else (diff / prev_val) * 100.0
-            pct_txt = "비교 불가(이전값 0)" if pct is None else f"{pct:+.1f}%"
-            msg = (
-                f"비교 결과를 정리했어요.\n"
-                f"- 현재값({cur_start} ~ {cur_end}): {cur_val:,.0f}\n"
-                f"- 이전값({prev_start} ~ {prev_end}): {prev_val:,.0f}\n"
-                f"- 증감: {diff:+,.0f}\n"
-                f"- 증감률: {pct_txt}"
-            )
+            cond_dim = _dimension_label(dim) if dim else "전체(총합)"
+            cond_metrics = _metrics_ui_label(requested_metrics)
             return {
                 "route": "ga4",
                 "response": {
-                    "message": msg,
+                    "message": (
+                        "요청한 비교를 실행했지만 조건에 맞는 데이터가 없었어요.\n"
+                        f"- 조건: 기간={cur_start}~{cur_end} vs {prev_start}~{prev_end}, 차원={cond_dim}, 지표={cond_metrics}\n"
+                        "- 기간을 넓히거나 차원을 `전체`로 바꿔 다시 확인해 주세요."
+                    ),
+                    "plot_data": [],
                     "period": f"{cur_start} ~ {cur_end}",
-                    "plot_data": {
-                        "type": "bar",
-                        "labels": ["이전값", "현재값"],
-                        "series": [{"name": metric_ui, "data": [prev_val, cur_val]}]
-                    },
-                    "raw_data": [{
-                        "metric": metric_ui,
-                        "previous": round(prev_val, 2),
-                        "current": round(cur_val, 2),
-                        "change": round(diff, 2),
-                        "change_pct": None if pct is None else round(pct, 2),
-                    }],
                     "followup_suggestions": _build_followups_from_state(st, question)
                 }
             }
 
-        # 차원 비교: 동일 키로 현재/이전 병합
+        if not dim:
+            cur_row = {}
+            prev_row = {}
+            for m in base_metrics:
+                cur_row[m] = float(cur_df.iloc[0].get(m, 0) or 0) if not cur_df.empty else 0.0
+                prev_row[m] = float(prev_df.iloc[0].get(m, 0) or 0) if not prev_df.empty else 0.0
+            cur_row = _apply_derived_metrics_to_row(cur_row, requested_metrics)
+            prev_row = _apply_derived_metrics_to_row(prev_row, requested_metrics)
+
+            compare_rows = []
+            for m in requested_metrics:
+                cv = _to_number(cur_row.get(m))
+                pv = _to_number(prev_row.get(m))
+                if cv is None or pv is None:
+                    continue
+                d = cv - pv
+                pp = None if pv == 0 else (d / pv) * 100.0
+                compare_rows.append({
+                    "metric": (GA4_METRICS.get(m, {}).get("ui_name") if m in GA4_METRICS else ("전환율" if m == "conversionRate" else m)),
+                    "metric_key": m,
+                    "previous": round(pv, 2),
+                    "current": round(cv, 2),
+                    "change": round(d, 2),
+                    "change_pct": None if pp is None else round(pp, 2),
+                })
+
+            if not compare_rows:
+                return None
+
+            lines = [
+                "비교 결과를 정리했어요.",
+                f"- 기준 기간: {cur_start} ~ {cur_end}",
+                f"- 비교 기간: {prev_start} ~ {prev_end}",
+            ]
+            for r in compare_rows[:4]:
+                pct_txt = "비교 불가" if r.get("change_pct") is None else f"{float(r['change_pct']):+.1f}%"
+                lines.append(
+                    f"- {r['metric']}: 현재값 {float(r['current']):,.2f}, 이전값 {float(r['previous']):,.2f}, 증감 {float(r['change']):+,.2f}, 증감률 {pct_txt}"
+                )
+
+            first = compare_rows[0]
+            return {
+                "route": "ga4",
+                "response": {
+                    "message": "\n".join(lines),
+                    "period": f"{cur_start} ~ {cur_end}",
+                    "plot_data": {
+                        "type": "bar",
+                        "labels": ["이전값", "현재값"],
+                        "series": [{"name": str(first["metric"]), "data": [float(first["previous"]), float(first["current"])]}]
+                    },
+                    "raw_data": compare_rows,
+                    "followup_suggestions": _build_followups_from_state(st, question)
+                }
+            }
+
+        # 차원 비교: primary metric 기준으로 비교(동일 쿼리 current/previous 2회)
+        primary_metric = requested_metrics[0]
         label_key = dim
-        cur_map: Dict[str, float] = {}
-        prev_map: Dict[str, float] = {}
-        for _, r in cur_df.iterrows():
-            k = str(r.get(label_key, "(not set)") or "(not set)")
-            cur_map[k] = cur_map.get(k, 0.0) + float(r.get(metric, 0) or 0)
-        for _, r in prev_df.iterrows():
-            k = str(r.get(label_key, "(not set)") or "(not set)")
-            prev_map[k] = prev_map.get(k, 0.0) + float(r.get(metric, 0) or 0)
-        all_keys = sorted(set(cur_map.keys()) | set(prev_map.keys()), key=lambda x: cur_map.get(x, 0.0), reverse=True)
+
+        def _agg(df: pd.DataFrame) -> Dict[str, Dict[str, float]]:
+            out: Dict[str, Dict[str, float]] = {}
+            for _, row in df.iterrows():
+                k = str(row.get(label_key, "(not set)") or "(not set)")
+                bucket = out.setdefault(k, {})
+                for bm in base_metrics:
+                    bucket[bm] = float(bucket.get(bm, 0.0)) + float(row.get(bm, 0) or 0)
+            return out
+
+        cur_agg = _agg(cur_df)
+        prev_agg = _agg(prev_df)
+        keys = list(set(cur_agg.keys()) | set(prev_agg.keys()))
+        keys.sort(key=lambda k: float((cur_agg.get(k, {}) or {}).get(base_metrics[0], 0.0)), reverse=True)
+
         rows = []
-        for k in all_keys:
-            c = float(cur_map.get(k, 0.0))
-            p = float(prev_map.get(k, 0.0))
-            d = c - p
-            pp = None if p == 0 else (d / p) * 100.0
+        for k in keys:
+            c_raw = _apply_derived_metrics_to_row(cur_agg.get(k, {}), requested_metrics)
+            p_raw = _apply_derived_metrics_to_row(prev_agg.get(k, {}), requested_metrics)
+            cv = _to_number(c_raw.get(primary_metric))
+            pv = _to_number(p_raw.get(primary_metric))
+            if cv is None or pv is None:
+                continue
+            d = cv - pv
+            pp = None if pv == 0 else (d / pv) * 100.0
             rows.append({
                 label_key: k,
-                "previous": round(p, 2),
-                "current": round(c, 2),
+                "previous": round(pv, 2),
+                "current": round(cv, 2),
                 "change": round(d, 2),
                 "change_pct": None if pp is None else round(pp, 2),
             })
         rows = rows[:10]
+        if not rows:
+            return None
+
+        metric_ui = "전환율" if primary_metric == "conversionRate" else (GA4_METRICS.get(primary_metric, {}).get("ui_name") or primary_metric)
         dim_ui = _dimension_label(dim).replace("별", "")
-        top = rows[0] if rows else {label_key: "-", "current": 0, "previous": 0, "change": 0, "change_pct": None}
+        top = rows[0]
         top_pct = "비교 불가" if top.get("change_pct") is None else f"{float(top['change_pct']):+.1f}%"
         msg = (
-            f"{dim_ui} 기준 비교를 정리했어요.\n"
+            f"{dim_ui} 기준 {metric_ui} 비교를 정리했어요.\n"
             f"- 기준 기간: {cur_start} ~ {cur_end}\n"
             f"- 비교 기간: {prev_start} ~ {prev_end}\n"
             f"- 1위 항목: {top.get(label_key, '-')}\n"
-            f"- 현재값: {float(top.get('current', 0)):,.0f} | 이전값: {float(top.get('previous', 0)):,.0f}\n"
-            f"- 증감: {float(top.get('change', 0)):+,.0f} | 증감률: {top_pct}"
+            f"- 현재값: {float(top.get('current', 0)):,.2f} | 이전값: {float(top.get('previous', 0)):,.2f}\n"
+            f"- 증감: {float(top.get('change', 0)):+,.2f} | 증감률: {top_pct}"
         )
         return {
             "route": "ga4",
@@ -2799,7 +2977,19 @@ def _direct_ga_state_compare_fallback(question: str, property_id: str, state: Di
         }
     except Exception as e:
         logging.warning(f"[Ask] direct ga state compare fallback failed: {e}")
-        return None
+        return {
+            "route": "ga4",
+            "response": {
+                "message": (
+                    "비교 쿼리 실행 중 오류가 발생했어요.\n"
+                    f"- 요청 조건: {question}\n"
+                    f"- 오류: {type(e).__name__}\n"
+                    "- 기간/지표를 유지한 채 다시 시도해 주세요."
+                ),
+                "plot_data": [],
+                "followup_suggestions": _build_followups_from_state(st, question)
+            }
+        }
 
 
 def _build_period_summary_via_simple_queries(
@@ -3629,6 +3819,14 @@ def ask_question():
                     "followup_suggestions": ["지난주 요약 알려줘", "채널별 사용자 수 알려줘", "상품별 매출 TOP 10 보여줘"]
                 }
             }
+        # 데이터 질문 실패 시에는 "무응답" 대신 실패 조건을 설명
+        elif _is_no_data_or_no_match_response(response) and _is_likely_ga_data_question(question):
+            response = _build_no_data_explained_response(
+                question=original_question or question,
+                state=analysis_state,
+                property_id=str(property_id or ""),
+                file_path=str(file_path or "")
+            )
 
         
         logging.info(f"[Ask] Response Keys: {response.keys() if isinstance(response, dict) else 'Not Dict'}")
