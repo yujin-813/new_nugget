@@ -2485,6 +2485,9 @@ def ask_question():
             )
             if not response:
                 response = _direct_ga_summary_fallback(question=original_question, property_id=property_id)
+        # 사용자 추이 질의도 전용 폴백 우선
+        if response is None and property_id:
+            response = _direct_ga_user_trend_fallback(question=original_question, property_id=property_id)
 
         # 사용자 부정 피드백(틀림/이상) 자동 수집
         if _is_negative_feedback_text(question):
@@ -2689,7 +2692,7 @@ def ask_question():
                     str(b.get("message", "")),
                     question=question
                 )
-                last_q_for_followup = session.get("last_user_question") or question
+                last_q_for_followup = session.get("last_user_question") or original_question
                 b["followup_suggestions"] = _normalize_followups(
                     route=str(r or ""),
                     body=b,
