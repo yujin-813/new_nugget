@@ -1802,8 +1802,10 @@
                 });
 
                 const data = await res.json();
-                const response = data.response || {};
-                const interactionId = data.interaction_id || response.interaction_id || null;
+                const response = (data && typeof data.response === 'object' && data.response !== null)
+                    ? data.response
+                    : ((data && typeof data === 'object') ? data : {});
+                const interactionId = (data && data.interaction_id) || response.interaction_id || null;
                 const periodText = response.period || data.period || null;
                 if (periodText) {
                     lastKnownPeriodText = String(periodText);
@@ -1825,7 +1827,7 @@
                     }
                     const structuredInsight = response.structured_insight || null;
                     const followups = Array.isArray(response.followup_suggestions) ? response.followup_suggestions : [];
-                    const botText = response.message || "응답이 없습니다.";
+                    const botText = response.message || data.message || "응답이 없습니다.";
                     appendMessage('bot', botText, plotData, structuredInsight, followups, interactionId, periodText, dataLabel, collectionPeriod);
                 }
 

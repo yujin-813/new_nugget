@@ -1145,6 +1145,36 @@ def _extract_response_body(resp: Any) -> Dict[str, Any]:
     return resp
 
 
+def _ensure_response_envelope(resp: Any) -> Dict[str, Any]:
+    """Normalize any handler output to {route, response{...}} for API stability."""
+    fallback_message = "요청을 처리했지만 응답 메시지가 비어 있어요. 다시 질문해 주세요."
+    if not isinstance(resp, dict):
+        return {
+            "route": "system",
+            "response": {"message": fallback_message, "plot_data": []}
+        }
+
+    route = str(resp.get("route") or "system")
+    if isinstance(resp.get("response"), dict):
+        out = dict(resp)
+        body = dict(resp.get("response") or {})
+        has_blocks = isinstance(body.get("blocks"), list) and len(body.get("blocks", [])) > 0
+        if not str(body.get("message", "")).strip() and not has_blocks:
+            body["message"] = fallback_message
+        body.setdefault("plot_data", [])
+        out["route"] = route
+        out["response"] = body
+        return out
+
+    body = dict(resp)
+    body.pop("route", None)
+    has_blocks = isinstance(body.get("blocks"), list) and len(body.get("blocks", [])) > 0
+    if not str(body.get("message", "")).strip() and not has_blocks:
+        body["message"] = fallback_message
+    body.setdefault("plot_data", [])
+    return {"route": route, "response": body}
+
+
 def _soften_message_tone(message: str, question: str = "") -> str:
     s = str(message or "").strip()
     if not s:
@@ -1233,7 +1263,7 @@ def _apply_bad_regression_guard(user_id: str, question: str, response: Any) -> A
     if isinstance(response.get("response"), dict):
         response["response"] = body
     else:
-        response = body
+        response = {"route": str(response.get("route") or "system"), "response": body}
     return response
 
 
@@ -3438,7 +3468,10 @@ def ask_question():
                 if isinstance(response.get("response"), dict):
                     response["response"] = b
                 else:
-                    response = b
+                    response = {"route": str(r or "system"), "response": b}
+
+        # 어떤 경로든 API 응답 포맷은 항상 {route, response{...}}로 강제
+        response = _ensure_response_envelope(response)
 
         # [P0] Session Save
         session['last_response'] = response
