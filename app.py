@@ -1,5 +1,5 @@
 import logging
-from datetime import timedelta
+from datetime import timedelta, date, datetime
 import uuid
 from flask import Flask, request, jsonify, session, redirect, url_for, send_from_directory, Response
 from werkzeug.utils import secure_filename
@@ -1724,6 +1724,104 @@ def get_traffic_data(dimensions, metrics, start_date, end_date, property_id):
         return pd.DataFrame(columns=columns)
     return pd.DataFrame(rows)
 
+
+def _resolve_summary_date_range(question: str) -> Tuple[str, str]:
+    q = (question or "").lower()
+    today = date.today()
+    if "지난주" in q:
+        # 이전 주(월~일)
+        this_monday = today - timedelta(days=today.weekday())
+        start = this_monday - timedelta(days=7)
+        end = this_monday - timedelta(days=1)
+        return start.isoformat(), end.isoformat()
+    if "지난달" in q:
+        first_this = today.replace(day=1)
+        last_prev = first_this - timedelta(days=1)
+        first_prev = last_prev.replace(day=1)
+        return first_prev.isoformat(), last_prev.isoformat()
+    if "이번달" in q or "이번 달" in q:
+        first_this = today.replace(day=1)
+        return first_this.isoformat(), today.isoformat()
+    if "오늘" in q:
+        d = today.isoformat()
+        return d, d
+    if "어제" in q:
+        d = (today - timedelta(days=1)).isoformat()
+        return d, d
+    # 기본: 최근 7일(어제까지)
+    end = today - timedelta(days=1)
+    start = end - timedelta(days=6)
+    return start.isoformat(), end.isoformat()
+
+
+def _direct_ga_summary_fallback(question: str, property_id: str) -> Dict[str, Any] | None:
+    if not property_id or 'credentials' not in session:
+        return None
+    try:
+        start_date, end_date = _resolve_summary_date_range(question)
+        totals = get_traffic_data(
+            dimensions=[],
+            metrics=[{"name": "activeUsers"}, {"name": "totalRevenue"}],
+            start_date=start_date,
+            end_date=end_date,
+            property_id=property_id
+        )
+        events = get_traffic_data(
+            dimensions=[{"name": "eventName"}],
+            metrics=[{"name": "eventCount"}],
+            start_date=start_date,
+            end_date=end_date,
+            property_id=property_id
+        )
+        if totals.empty and events.empty:
+            return None
+
+        active_users = 0
+        revenue = 0
+        if not totals.empty:
+            try:
+                active_users = int(float(totals.iloc[0].get("activeUsers", 0) or 0))
+            except Exception:
+                active_users = 0
+            try:
+                revenue = int(round(float(totals.iloc[0].get("totalRevenue", 0) or 0)))
+            except Exception:
+                revenue = 0
+
+        top_event_text = "확인되지 않음"
+        top_rows = []
+        if not events.empty and "eventCount" in events.columns and "eventName" in events.columns:
+            events["eventCount"] = pd.to_numeric(events["eventCount"], errors="coerce").fillna(0)
+            events = events.sort_values("eventCount", ascending=False).head(3)
+            top_rows = events.to_dict("records")
+            if top_rows:
+                e0 = top_rows[0]
+                top_event_text = f"{e0.get('eventName', '-') } ({int(e0.get('eventCount', 0)):,}회)"
+
+        msg = (
+            f"핵심: 지난주 요약을 확인했어요.\n"
+            f"- 활성 사용자: {active_users:,}명\n"
+            f"- 구매 수익: {revenue:,}원\n"
+            f"- 주요 이벤트: {top_event_text}"
+        )
+        return {
+            "route": "ga4",
+            "response": {
+                "message": msg,
+                "plot_data": [],
+                "period": f"{start_date} ~ {end_date}",
+                "raw_data": top_rows,
+                "followup_suggestions": [
+                    "지난주 요약을 채널별로 나눠서 보여줘",
+                    "지난주 사용자 추이를 일별로 보여줘",
+                    "지난주 구매 수익을 이전 기간과 비교해줘"
+                ]
+            }
+        }
+    except Exception as e:
+        logging.warning(f"[Ask] direct ga summary fallback failed: {e}")
+        return None
+
 @app.route("/list_all")
 def list_all():
     try:
@@ -2377,6 +2475,10 @@ def ask_question():
                             ]
                         }
                     }
+                else:
+                    direct_summary = _direct_ga_summary_fallback(question=question, property_id=property_id)
+                    if isinstance(direct_summary, dict):
+                        response = direct_summary
 
         # 마지막 GA 구조적 안전망: 데이터 질문이면 깨끗한 상태로 원문 1회 재시도
         if _is_ga_no_match_response(response) and _is_likely_ga_data_question(question):
