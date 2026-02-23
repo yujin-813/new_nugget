@@ -1782,6 +1782,15 @@ def _resolve_summary_date_range(question: str) -> Tuple[str, str]:
     return start.isoformat(), end.isoformat()
 
 
+def _previous_period(start_date: str, end_date: str) -> Tuple[str, str]:
+    s = datetime.fromisoformat(start_date).date()
+    e = datetime.fromisoformat(end_date).date()
+    days = (e - s).days + 1
+    prev_end = s - timedelta(days=1)
+    prev_start = prev_end - timedelta(days=days - 1)
+    return prev_start.isoformat(), prev_end.isoformat()
+
+
 def _direct_ga_summary_fallback(question: str, property_id: str) -> Dict[str, Any] | None:
     if not property_id or 'credentials' not in session:
         return None
@@ -1928,6 +1937,76 @@ def _direct_ga_user_trend_fallback(question: str, property_id: str) -> Dict[str,
         }
     except Exception as e:
         logging.warning(f"[Ask] direct ga user trend fallback failed: {e}")
+        return None
+
+
+def _direct_ga_revenue_compare_fallback(question: str, property_id: str) -> Dict[str, Any] | None:
+    q = (question or "").lower()
+    if not property_id or 'credentials' not in session:
+        return None
+    has_revenue = any(k in q for k in ["매출", "수익", "revenue"])
+    has_compare = any(k in q for k in ["비교", "대비", "증감", "차이", "이전 기간"])
+    has_period = any(k in q for k in ["지난주", "지난달", "이번주", "이번달", "오늘", "어제"])
+    if not (has_revenue and has_compare and has_period):
+        return None
+    try:
+        cur_start, cur_end = _resolve_summary_date_range(question)
+        prev_start, prev_end = _previous_period(cur_start, cur_end)
+
+        cur_df = get_traffic_data(
+            dimensions=[],
+            metrics=[{"name": "totalRevenue"}],
+            start_date=cur_start,
+            end_date=cur_end,
+            property_id=property_id
+        )
+        prev_df = get_traffic_data(
+            dimensions=[],
+            metrics=[{"name": "totalRevenue"}],
+            start_date=prev_start,
+            end_date=prev_end,
+            property_id=property_id
+        )
+        if cur_df.empty and prev_df.empty:
+            return None
+
+        cur_val = int(round(float(cur_df.iloc[0].get("totalRevenue", 0) or 0))) if not cur_df.empty else 0
+        prev_val = int(round(float(prev_df.iloc[0].get("totalRevenue", 0) or 0))) if not prev_df.empty else 0
+        diff = cur_val - prev_val
+        pct = None if prev_val == 0 else (diff / prev_val) * 100.0
+        diff_txt = f"+{diff:,}" if diff >= 0 else f"{diff:,}"
+        pct_txt = "비교 불가(이전 기간 0)" if pct is None else f"{pct:+.1f}%"
+
+        msg = (
+            "핵심: 지난주 구매 수익을 이전 기간과 비교했어요.\n"
+            f"- 현재 기간({cur_start} ~ {cur_end}): {cur_val:,}원\n"
+            f"- 이전 기간({prev_start} ~ {prev_end}): {prev_val:,}원\n"
+            f"- 증감: {diff_txt}원 ({pct_txt})"
+        )
+
+        return {
+            "route": "ga4",
+            "response": {
+                "message": msg,
+                "period": f"{cur_start} ~ {cur_end}",
+                "plot_data": {
+                    "type": "bar",
+                    "labels": ["이전 기간", "현재 기간"],
+                    "series": [{"name": "구매 수익", "data": [prev_val, cur_val]}]
+                },
+                "raw_data": [
+                    {"period": f"{prev_start} ~ {prev_end}", "totalRevenue": prev_val},
+                    {"period": f"{cur_start} ~ {cur_end}", "totalRevenue": cur_val}
+                ],
+                "followup_suggestions": [
+                    "지난주 구매 수익을 채널별로 비교해줘",
+                    "지난주 상품별 매출 TOP 10 보여줘",
+                    "지난주 구매 수익 추이를 일별로 보여줘"
+                ]
+            }
+        }
+    except Exception as e:
+        logging.warning(f"[Ask] direct ga revenue compare fallback failed: {e}")
         return None
 
 
@@ -2529,6 +2608,12 @@ def ask_question():
             )
             if not response:
                 response = _direct_ga_summary_fallback(question=original_question, property_id=property_id)
+        # 비교형 매출 질의는 직접 집계 fallback 우선
+        if response is None and property_id:
+            response = _direct_ga_revenue_compare_fallback(
+                question=original_question,
+                property_id=property_id
+            )
         # 사용자 추이 질의도 전용 폴백 우선
         if response is None and property_id:
             response = _direct_ga_user_trend_fallback(question=original_question, property_id=property_id)
