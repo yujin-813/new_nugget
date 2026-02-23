@@ -1471,8 +1471,13 @@ def handle_question(
 
                 if last_result:
                     res = post_process(last_result, question)
-                    history.add_ai_message(str(res.get("message", "")))
-                    return {"response": res, "route": "ga4_followup"}
+                    # 이전 결과가 불완전해 follow-up 후처리가 실패하면,
+                    # 그대로 종료하지 않고 새 GA4 분석으로 폴백한다.
+                    msg = str(res.get("message", ""))
+                    if "이전 분석 결과가 존재하지 않습니다" not in msg:
+                        history.add_ai_message(msg)
+                        return {"response": res, "route": "ga4_followup"}
+                    logging.info("[Followup Detector] last_result 불완전 → GA4 새 분석 실행")
 
                 logging.info("[Followup Detector] last_result 없음 → GA4 새 분석 실행")
 
