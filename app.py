@@ -225,11 +225,36 @@ def _extract_query_constraints(question: str) -> Dict[str, Any]:
 
 def _is_expansion_request(question: str) -> bool:
     q = str(question or "").lower()
-    ext_tokens = ["비교", "증감", "증감률", "채널별", "소스/매체별", "소스별", "매체별", "상품별", "테이블", "표", "원인"]
+    ext_tokens = [
+        "비교", "증감", "증감률", "채널별", "소스/매체별", "소스별", "매체별", "상품별", "테이블", "표", "원인",
+        "더 내려", "세분", "드릴다운", "상세", "깊게", "나눠서"
+    ]
     has_ext = any(t in q for t in ext_tokens)
     sig = _intent_signature(question)
     has_core = any(sig.values())
     return has_ext and (len(q) <= 40 or not has_core)
+
+
+def _detect_drilldown_dimension(current_q: str, previous_q: str) -> str:
+    cur = str(current_q or "").lower()
+    prev = str(previous_q or "").lower()
+    if any(k in cur for k in ["소스/매체", "source/medium", "source medium"]):
+        return "소스/매체별"
+    if any(k in cur for k in ["채널", "channel"]):
+        return "채널별"
+    if any(k in cur for k in ["디바이스", "기기", "device"]):
+        return "디바이스별"
+    if any(k in cur for k in ["국가", "country"]):
+        return "국가별"
+    if any(k in cur for k in ["상품", "카테고리", "후원명", "donation_name"]):
+        return "상품별"
+    # "더 내려서/세분화"처럼 차원 미지정 확장 질의는 유입 분석 기본 드릴다운으로 처리
+    if any(k in cur for k in ["더 내려", "세분", "드릴다운", "상세", "깊게"]):
+        if any(k in prev for k in ["유입", "소스", "경로", "트래픽"]):
+            return "소스/매체별"
+        if "채널" in prev:
+            return "소스/매체별"
+    return ""
 
 
 def _merge_with_previous_query(current_q: str, previous_q: str) -> str:
@@ -240,6 +265,11 @@ def _merge_with_previous_query(current_q: str, previous_q: str) -> str:
 
     c = _extract_query_constraints(cur)
     p = _extract_query_constraints(prev)
+
+    drill_dim = _detect_drilldown_dimension(cur, prev)
+    if drill_dim:
+        merged = f"{prev}를 {drill_dim}로 나눠서 보여줘"
+        return re.sub(r"\s+", " ", merged).strip()
 
     needs_expand = _is_expansion_request(cur)
     if needs_expand:
@@ -321,25 +351,11 @@ def _build_reask_suggestions(question: str) -> List[str]:
         return ["eventName 기준으로 볼까요?", "donation_click 이벤트만 볼까요?", "이벤트를 기간 비교로 볼까요?"]
     if sig["user"]:
         return ["활성 사용자로 볼까요?", "전체 구매자 수로 볼까요?", "채널별 사용자로 볼까요?"]
-    return ["지표명을 포함해 다시 질문해 주세요.", "기간을 함께 지정해볼까요?", "차원(예: 채널/상품)도 함께 지정해볼까요?"]
+    return ["기간을 지정해 다시 볼까요?", "채널별/소스별처럼 분석 기준을 하나 정할까요?", "현재 질문을 요약 분석으로 바꿔볼까요?"]
 
 
 def _build_contextual_clarify_message(question: str) -> str:
-    sig = _intent_signature(question)
-    if sig["channel"]:
-        examples = "`지난주 채널별 활성 사용자` , `소스/매체별 사용자` , `채널별 구매 수익`"
-    elif sig["revenue"]:
-        examples = "`지난주 구매 수익` , `상품별 매출 TOP 10` , `채널별 매출`"
-    elif sig["user"]:
-        examples = "`지난주 활성 사용자 수` , `사용자 추이(일별)` , `채널별 사용자 수`"
-    elif sig["event"]:
-        examples = "`지난주 이벤트 TOP 10` , `특정 이벤트 클릭 수` , `이벤트를 채널별로`"
-    else:
-        examples = "`지난주 요약` , `채널별 사용자 수` , `상품별 매출 TOP 10`"
-    return (
-        "질문을 이해했지만 현재 응답 후보와 의도가 조금 어긋났어요.\n"
-        f"아래처럼 한 번만 지정해 주시면 바로 분석할게요: {examples}"
-    )
+    return "질문 의도는 이해했어요. 현재 조건으로는 분석 기준이 부족해 바로 실행이 어려워요. 기간 또는 분석 기준(예: 채널/소스/상품) 중 하나만 지정해 주세요."
 
 
 def _extract_period_prefix(text: str) -> str:

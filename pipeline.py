@@ -73,6 +73,34 @@ def _has_data_signal(question: str) -> bool:
     return any(t in q for t in tokens)
 
 
+def _default_dimension_for_question(question: str) -> Optional[str]:
+    q = (question or "").lower()
+    if any(t in q for t in ["소스", "매체", "source", "medium", "유입", "경로", "트래픽"]):
+        return "sessionSourceMedium"
+    if "채널" in q:
+        return "sessionDefaultChannelGroup"
+    if any(t in q for t in ["상품", "카테고리", "후원명", "donation_name"]):
+        return "itemName"
+    if any(t in q for t in ["국가", "country"]):
+        return "country"
+    if any(t in q for t in ["추이", "흐름", "일별", "월별", "변화"]):
+        return "date"
+    if any(t in q for t in ["이벤트", "click", "클릭"]):
+        return "eventName"
+    return None
+
+
+def _default_metric_for_question(question: str) -> Dict[str, Any]:
+    q = (question or "").lower()
+    if any(t in q for t in ["매출", "수익", "revenue", "금액"]):
+        return {"name": "purchaseRevenue", "score": 0.72, "matched_by": "pipeline_fallback_default", "scope": "event"}
+    if any(t in q for t in ["이벤트", "클릭", "click", "횟수", "건수"]):
+        return {"name": "eventCount", "score": 0.72, "matched_by": "pipeline_fallback_default", "scope": "event"}
+    if any(t in q for t in ["사용자", "유저", "후원자", "구매자", "세션"]):
+        return {"name": "activeUsers", "score": 0.72, "matched_by": "pipeline_fallback_default", "scope": "event"}
+    return {"name": "activeUsers", "score": 0.68, "matched_by": "pipeline_fallback_default", "scope": "event"}
+
+
 def _is_abstract_analysis_query(question: str) -> bool:
     q = (question or "").lower()
     abstract_tokens = ["유입", "성과", "현황", "트래픽"]
@@ -293,13 +321,23 @@ class GA4Pipeline:
                             "plot_data": [],
                             "matching_debug": matching_debug
                         }
-                    return {
-                        "status": "clarify",
-                        "message": "질문에서 매칭 가능한 지표를 찾지 못했습니다. 사용 가능한 지표명(예: 활성 사용자, 세션, 구매 수익, 상품 수익)으로 다시 질문해 주세요.",
-                        "blocks": [],
-                        "plot_data": [],
-                        "matching_debug": matching_debug
-                    }
+                    # 후보 기반 매칭 실패 시에도 가능한 유사 분석으로 fallback 실행
+                    fallback_metric = _default_metric_for_question(question)
+                    metric_candidates = [fallback_metric]
+                    fallback_dim = _default_dimension_for_question(question)
+                    if fallback_dim:
+                        dim_scope = "session" if fallback_dim in ["sessionSourceMedium", "sessionDefaultChannelGroup"] else "event"
+                        dimension_candidates = [{
+                            "name": fallback_dim,
+                            "score": 0.70,
+                            "matched_by": "pipeline_fallback_default",
+                            "scope": dim_scope
+                        }]
+                        intent = "breakdown"
+                        modifiers["needs_breakdown"] = True
+                        modifiers["needs_total"] = False
+                    else:
+                        intent = "metric_single"
             
             # ================================================================
             # STEP 3: Build Execution Plan
@@ -349,6 +387,8 @@ class GA4Pipeline:
                 final_state = {
                     "metrics": anchor_block.metrics,
                     "dimensions": anchor_block.dimensions,
+                    "filters": anchor_block.filters,
+                    "modifiers": modifiers,
                     "start_date": execution_plan.start_date,
                     "end_date": execution_plan.end_date,
                     "intent": intent

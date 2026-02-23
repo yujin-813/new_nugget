@@ -240,7 +240,14 @@ class GA4Planner:
         blocks = self._create_blocks(
             final_metrics, final_dimensions, intent, modifiers
         )
-        
+
+        # drill-down follow-up에서는 직전 필터를 최대한 유지
+        if modifiers.get("inherit_last_filters") and isinstance(last_state, dict):
+            inherited = last_state.get("filters")
+            if isinstance(inherited, dict) and inherited:
+                for b in blocks:
+                    b.filters = self._merge_inherited_filters(b.filters, inherited)
+
         plan = ExecutionPlan(
             property_id=property_id,
             start_date=start_date,
@@ -255,6 +262,24 @@ class GA4Planner:
             logging.info(f"  - {b.block_id} ({b.scope}): {len(b.metrics)} metrics, {len(b.dimensions)} dims")
         
         return plan
+
+    def _merge_inherited_filters(self, current: Dict[str, Any], inherited: Dict[str, Any]) -> Dict[str, Any]:
+        out = dict(current or {})
+        for k, v in (inherited or {}).items():
+            if k not in out:
+                out[k] = v
+                continue
+            if isinstance(out[k], list) and isinstance(v, list):
+                merged = []
+                seen = set()
+                for x in out[k] + v:
+                    key = str(x)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    merged.append(x)
+                out[k] = merged
+        return out
 
     def _build_breakdown_metric_candidates(
         self,
@@ -608,6 +633,7 @@ class GA4Planner:
                     block_type="total",
                     metrics=total_metrics,
                     dimensions=[],
+                    filters=self._build_entity_filters(total_scope, modifiers, []),
                     title=f"{total_scope.upper()} 전체 요약"
                 ))
 
@@ -652,6 +678,7 @@ class GA4Planner:
                     block_type="total",
                     metrics=scope_metrics,
                     dimensions=[],
+                    filters=self._build_entity_filters(scope, modifiers, []),
                     title=f"{scope.upper()} 전체 요약"
                 )
                 blocks.append(total_block)
@@ -678,11 +705,31 @@ class GA4Planner:
                     scope=scope,
                     block_type="total",
                     metrics=scope_metrics,
-                    dimensions=scoped_dims,
+                    dimensions=[],
+                    filters=self._build_entity_filters(scope, modifiers, []),
                     title=f"{scope.upper()} 지표"
                 )
                 blocks.append(total_block)
         
+        # 완료 전환율 계산용 보조 블록:
+        # eventName 기준 purchase / donation_click eventCount를 같이 조회해
+        # 어댑터에서 conversion = purchase / donation_click 계산
+        if modifiers.get("needs_conversion_block"):
+            conv_dims = [{"name": "eventName"}]
+            conv_metrics = [{"name": "eventCount"}]
+            conv_filters = {
+                "event_filters": ["purchase", "donation_click"]
+            }
+            blocks.append(PlanBlock(
+                block_id="conversion_event_pair",
+                scope="event",
+                block_type="breakdown",
+                metrics=conv_metrics,
+                dimensions=conv_dims,
+                filters=conv_filters,
+                title="후원 전환 계산용 이벤트 집계"
+            ))
+
         return blocks
 
     def _metric_scope(self, metric_name: str) -> str:

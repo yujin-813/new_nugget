@@ -1753,7 +1753,14 @@ class ModifierExtractor:
             modifiers["needs_total"] = False
             modifiers["scope_hint"] = ["event"]
             modifiers["force_dimensions"] = ["date"]
-        if any(k in q for k in ["전환율", "conversion rate", "전환 비율"]):
+        # 일반 전환율 질의: 금액/완료건수 맥락이 없을 때만 기본 rate 지표 강제
+        has_amount_or_count_context = any(
+            k in q for k in [
+                "금액", "매출", "수익", "완료", "완료건수", "완료 건수",
+                "건수", "횟수", "구매수", "트랜잭션", "transaction"
+            ]
+        )
+        if any(k in q for k in ["전환율", "conversion rate", "전환 비율"]) and not has_amount_or_count_context:
             modifiers["force_metrics"] = ["sessionKeyEventRate", "purchaserRate", "purchaseToViewRate"]
         if q.strip() in ["비교", "비교해", "비교해서", "대비", "증감"]:
             modifiers["needs_breakdown"] = True
@@ -1806,6 +1813,23 @@ class ModifierExtractor:
             modifiers["force_metrics"] = ["transactions", "totalPurchasers"]
             modifiers["needs_total"] = True
             modifiers["needs_breakdown"] = False
+            modifiers["suppress_entity_filters"] = True
+            modifiers.pop("entity_contains", None)
+            modifiers.pop("item_name_contains", None)
+
+        # "총 후원금액 + 후원 완료 건수 + 후원 전환율" 류 복합 질의
+        # 전환율은 purchase / donation_click(완료/클릭) 계산으로 별도 블록에서 산출
+        has_conversion = any(k in q for k in ["전환율", "전환 비율", "conversion rate"])
+        has_total_amount = any(k in q for k in ["총 후원금액", "총후원금액", "총 매출", "총매출", "후원금액", "후원 금액"])
+        has_completion = any(k in q for k in ["완료 건수", "완료건수", "후원 완료", "구매 건수", "구매수", "트랜잭션"])
+        if has_conversion and (has_total_amount or has_completion):
+            modifiers["scope_hint"] = ["event"]
+            modifiers["needs_total"] = True
+            modifiers["needs_breakdown"] = False
+            modifiers["event_filter"] = "purchase"
+            # 완료 건수는 purchase 이벤트의 eventCount로 해석
+            modifiers["force_metrics"] = ["purchaseRevenue", "eventCount"]
+            modifiers["needs_conversion_block"] = True
             modifiers["suppress_entity_filters"] = True
             modifiers.pop("entity_contains", None)
             modifiers.pop("item_name_contains", None)
@@ -2209,6 +2233,41 @@ class ModifierExtractor:
 
 
 # =============================================================================
+# Follow-up / Drill-down Helpers
+# =============================================================================
+
+def _is_drilldown_followup(question: str) -> bool:
+    q = (question or "").lower()
+    tokens = ["더 내려", "세분", "드릴다운", "상세", "깊게", "나눠서", "기준으로"]
+    dim_tokens = ["채널", "소스", "매체", "경로", "국가", "디바이스", "상품", "카테고리", "후원명", "donation_name"]
+    return any(t in q for t in tokens) or any(t in q for t in dim_tokens)
+
+
+def _infer_drilldown_dimension(question: str, last_state: Optional[Dict]) -> Optional[str]:
+    q = (question or "").lower()
+    if any(k in q for k in ["소스/매체", "source/medium", "소스", "매체", "경로", "유입"]):
+        return "sessionSourceMedium"
+    if "채널" in q:
+        return "sessionDefaultChannelGroup"
+    if any(k in q for k in ["국가", "country"]):
+        return "country"
+    if any(k in q for k in ["디바이스", "기기", "device"]):
+        return "deviceCategory"
+    if any(k in q for k in ["상품", "카테고리"]):
+        return "itemName"
+    if any(k in q for k in ["후원명", "donation_name"]):
+        return "customEvent:donation_name"
+    # 차원 미지정 드릴다운은 이전 차원에서 한 단계 세분화
+    if last_state and isinstance(last_state.get("dimensions"), list) and last_state.get("dimensions"):
+        prev_dim = (last_state["dimensions"][0] or {}).get("name")
+        if prev_dim in ["sessionDefaultChannelGroup", "defaultChannelGroup"]:
+            return "sessionSourceMedium"
+        if prev_dim in ["sessionSource", "source", "sessionSourceMedium"]:
+            return "sessionSourceMedium"
+    return None
+
+
+# =============================================================================
 # Main Orchestrator
 # =============================================================================
 
@@ -2393,6 +2452,39 @@ class CandidateExtractor:
         
         # 5. Modifiers
         modifiers = ModifierExtractor.extract(question)
+
+        # 확장 질의는 독립 intent가 아니라 직전 질의의 drill-down으로 처리
+        if last_state and _is_drilldown_followup(question):
+            modifiers["needs_breakdown"] = True
+            modifiers["needs_total"] = False
+            modifiers["inherit_last_filters"] = True
+            drill_dim = _infer_drilldown_dimension(question, last_state)
+            if drill_dim:
+                modifiers["force_dimensions"] = [drill_dim]
+                dim_meta = GA4_DIMENSIONS.get(drill_dim, {})
+                dim_scope = dim_meta.get("scope") or "event"
+                dimension_candidates = [{
+                    "name": drill_dim,
+                    "score": 0.97,
+                    "matched_by": "drilldown_followup",
+                    "scope": dim_scope,
+                    "category": dim_meta.get("category"),
+                    "priority": dim_meta.get("priority", 0),
+                }]
+                intent = "breakdown"
+
+            if not metric_candidates and isinstance(last_state.get("metrics"), list):
+                for m in last_state.get("metrics", []):
+                    m_name = (m or {}).get("name")
+                    if not m_name:
+                        continue
+                    metric_candidates.append({
+                        "name": m_name,
+                        "score": 0.95,
+                        "matched_by": "drilldown_followup",
+                        "scope": GA4_METRICS.get(m_name, {}).get("scope") or "event",
+                        "priority": GA4_METRICS.get(m_name, {}).get("priority", 0),
+                    })
 
         # 5.1 Optional: local LLM intent/matching merge
         merged = self._merge_local_intent(
