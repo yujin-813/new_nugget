@@ -522,7 +522,7 @@ def _rewrite_ga_question_for_retry(question: str) -> str:
     if is_summary:
         return f"{period}활성 사용자 수, 구매 수익, 이벤트 TOP 10을 요약해줘".strip()
 
-    if any(k in lq for k in ["유입", "경로", "트래픽"]) and any(k in lq for k in ["분석", "알려", "보여"]):
+    if any(k in lq for k in ["유입", "경로", "트래픽", "성과", "현황"]) and any(k in lq for k in ["분석", "알려", "보여", "어때"]):
         return f"{period}채널별 활성 사용자와 소스/매체별 활성 사용자 보여줘".strip()
 
     if "사용자" in lq and any(k in lq for k in ["추이", "트렌드", "흐름"]):
@@ -669,8 +669,8 @@ def _normalize_followups(route: str, body: Dict[str, Any], current_question: str
         # 숫자 선택형 같은 애매 문구 제거
         if re.match(r"^\s*\d+\s*번?\s*$", f):
             continue
-        rewritten = _rewrite_followup_with_context(f, last_user_question or current_question)
-        rewritten = _make_followup_actionable(rewritten, last_user_question or current_question)
+        # 추천 질문은 현재 응답 기반으로만 사용 (이전 질문 문자열 누적 금지)
+        rewritten = _make_followup_actionable(f, "")
         s = re.sub(r"\s+", " ", rewritten).strip()
         if not s:
             continue

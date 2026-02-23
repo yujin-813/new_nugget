@@ -67,9 +67,20 @@ def _has_data_signal(question: str) -> bool:
     tokens = [
         "매출", "수익", "사용자", "세션", "이벤트", "클릭", "구매", "비율", "율",
         "추이", "비교", "상위", "top", "채널", "소스", "매체", "국가", "기간", "전주", "지난주",
-        "후원", "상품", "이름", "후원명", "donation_name", "경로", "트랜잭션", "처음", "신규"
+        "후원", "상품", "이름", "후원명", "donation_name", "경로", "트랜잭션", "처음", "신규",
+        "유입", "성과", "현황", "트래픽"
     ]
     return any(t in q for t in tokens)
+
+
+def _is_abstract_analysis_query(question: str) -> bool:
+    q = (question or "").lower()
+    abstract_tokens = ["유입", "성과", "현황", "트래픽"]
+    dim_tokens = ["채널", "소스", "매체", "경로", "상품", "카테고리", "국가", "디바이스", "페이지", "이벤트"]
+    has_abstract = any(t in q for t in abstract_tokens)
+    has_explicit_dim = any(t in q for t in dim_tokens)
+    # 추상 분석 질의는 차원 분석으로 유도
+    return has_abstract and not has_explicit_dim
 
 
 class GA4Pipeline:
@@ -187,6 +198,23 @@ class GA4Pipeline:
                 }
 
             q = (question or "").lower()
+            is_abstract = _is_abstract_analysis_query(question)
+            if is_abstract:
+                intent = "breakdown"
+                modifiers["needs_breakdown"] = True
+                modifiers["needs_total"] = False  # 총합-only fallback 금지
+                # 차원 힌트가 없으면 유입 분석 기본 차원 후보를 채운다
+                if not dimension_candidates:
+                    dimension_candidates = [
+                        {"name": "sessionDefaultChannelGroup", "score": 0.90, "matched_by": "pipeline_abstract_default", "scope": "session"},
+                        {"name": "sessionSourceMedium", "score": 0.86, "matched_by": "pipeline_abstract_default", "scope": "session"},
+                    ]
+                # 메트릭은 총합만 주지 않도록 최소 활성사용자 + 세션 후보
+                if not metric_candidates:
+                    metric_candidates = [
+                        {"name": "activeUsers", "score": 0.85, "matched_by": "pipeline_abstract_default", "scope": "event"},
+                        {"name": "sessions", "score": 0.80, "matched_by": "pipeline_abstract_default", "scope": "session"},
+                    ]
             # trend/비교성 사용자 질문은 후보가 약해도 기본 지표를 보강
             if not metric_candidates:
                 if intent == "trend" and any(k in q for k in ["사용자", "유저", "세션", "추이", "일별", "흐름"]):
@@ -247,22 +275,31 @@ class GA4Pipeline:
             top_dim_score = dimension_candidates[0].get("score", 0) if dimension_candidates else 0
             has_dimension_signal = bool(dimension_candidates) and top_dim_score >= 0.60
             if (not metric_candidates and not short_dimension_followup and not short_compare_followup and not has_dimension_signal) or (not has_prev_metrics and top_score < 0.45 and not has_dimension_signal):
-                if _looks_explanatory_question(question):
+                if is_abstract:
+                    # 추상 분석 질의는 clarify로 빠지지 않게 차원 중심 기본 쿼리를 강제
+                    metric_candidates = [{"name": "activeUsers", "score": 0.72, "matched_by": "pipeline_abstract_recover", "scope": "event"}]
+                    if not dimension_candidates:
+                        dimension_candidates = [{"name": "sessionDefaultChannelGroup", "score": 0.72, "matched_by": "pipeline_abstract_recover", "scope": "session"}]
+                    intent = "breakdown"
+                    modifiers["needs_breakdown"] = True
+                    modifiers["needs_total"] = False
+                else:
+                    if _looks_explanatory_question(question):
+                        return {
+                            "status": "ok",
+                            "message": _safe_general_answer(question),
+                            "account": property_id,
+                            "blocks": [],
+                            "plot_data": [],
+                            "matching_debug": matching_debug
+                        }
                     return {
-                        "status": "ok",
-                        "message": _safe_general_answer(question),
-                        "account": property_id,
+                        "status": "clarify",
+                        "message": "질문에서 매칭 가능한 지표를 찾지 못했습니다. 사용 가능한 지표명(예: 활성 사용자, 세션, 구매 수익, 상품 수익)으로 다시 질문해 주세요.",
                         "blocks": [],
                         "plot_data": [],
                         "matching_debug": matching_debug
                     }
-                return {
-                    "status": "clarify",
-                    "message": "질문에서 매칭 가능한 지표를 찾지 못했습니다. 사용 가능한 지표명(예: 활성 사용자, 세션, 구매 수익, 상품 수익)으로 다시 질문해 주세요.",
-                    "blocks": [],
-                    "plot_data": [],
-                    "matching_debug": matching_debug
-                }
             
             # ================================================================
             # STEP 3: Build Execution Plan
