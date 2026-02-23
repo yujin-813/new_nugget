@@ -139,6 +139,35 @@ def _topic_particle(text: str) -> str:
     return "은"
 
 
+def _compose_card_message(message_parts: List[str], quality_warnings: List[str], concise: bool) -> str:
+    parts = [str(x).strip() for x in (message_parts or []) if str(x).strip()]
+    if not parts:
+        if quality_warnings:
+            return quality_warnings[0]
+        return "요청하신 내용을 확인했어요."
+
+    conclusion = parts[0]
+    evidence = []
+    for p in parts[1:]:
+        if p not in evidence:
+            evidence.append(p)
+        if len(evidence) >= 3:
+            break
+
+    lines = [f"핵심: {conclusion}"]
+    if concise:
+        if evidence:
+            lines.append(f"근거: {evidence[0]}")
+    else:
+        for e in evidence[:2]:
+            lines.append(f"- {e}")
+
+    if quality_warnings:
+        lines.append(f"참고: {quality_warnings[0]}")
+
+    return "\n".join(lines)
+
+
 def _summarize_top_item(row: Dict[str, Any]) -> str:
     if not isinstance(row, dict) or not row:
         return "상위 항목을 확인했습니다."
@@ -1134,16 +1163,12 @@ def adapt_pipeline_response_to_legacy(
     if type_axis_note:
         message_parts = [type_axis_note] + message_parts
     
-    # 최종 메시지
-    if not message_parts:
-        if quality_warnings:
-            final_message = quality_warnings[0]
-        else:
-            final_message = "분석이 완료되었습니다."
-    else:
-        final_message = " ".join(message_parts) if concise else "\n".join(message_parts)
-        if quality_warnings:
-            final_message = final_message + ("\n" if not concise else " ") + quality_warnings[0]
+    # 최종 메시지: 결론 1줄 + 근거 2~3줄 카드형 포맷
+    final_message = _compose_card_message(
+        message_parts=message_parts,
+        quality_warnings=quality_warnings,
+        concise=concise
+    )
     
     has_trend_block = any(b.get("type") == "trend" for b in breakdown_blocks)
     period_text = str(pipeline_response.get("period") or "").strip()
