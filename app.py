@@ -532,6 +532,27 @@ def _extract_response_body(resp: Any) -> Dict[str, Any]:
     return resp
 
 
+def _soften_message_tone(message: str, question: str = "") -> str:
+    s = str(message or "").strip()
+    if not s:
+        return s
+    replacements = {
+        "질문 의도는 이해했지만 현재 데이터에서 조건에 맞는 항목을 찾지 못했습니다.": "요청하신 조건으로는 데이터를 찾지 못했어요.",
+        "질문에서 매칭 가능한 지표를 찾지 못했습니다.": "질문에 딱 맞는 지표를 아직 찾지 못했어요.",
+        "사용 가능한 지표명": "예시 지표",
+        "기준 상위 결과는": "기준으로 보면 가장 큰 값은",
+        "상위 목록:": "상위 항목:",
+        "원인 분석 관점에서 보면": "데이터를 보면",
+        "다시 확인해 주세요.": "다시 볼 수 있도록 도와드릴게요.",
+    }
+    for a, b in replacements.items():
+        s = s.replace(a, b)
+    # 지나치게 기계적인 첫 문장 완화
+    if "입니다." in s and not s.startswith(("좋아요", "요청하신", "데이터를 보면")):
+        s = "좋아요. " + s
+    return s
+
+
 def _apply_bad_regression_guard(user_id: str, question: str, response: Any) -> Any:
     """
     Guardrail for repeated bad-labeled patterns:
@@ -2336,6 +2357,10 @@ def ask_question():
             r = response.get("route")
             b = response.get("response") if isinstance(response.get("response"), dict) else response
             if isinstance(b, dict):
+                b["message"] = _soften_message_tone(
+                    str(b.get("message", "")),
+                    question=question
+                )
                 last_q_for_followup = session.get("last_user_question") or question
                 b["followup_suggestions"] = _normalize_followups(
                     route=str(r or ""),

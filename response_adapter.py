@@ -518,6 +518,51 @@ def _build_donation_type_conversion_message(question: str, rows: List[Dict[str, 
     return "\n".join(lines) if valid else ""
 
 
+def _build_purchase_completion_conversion_message(question: str, rows: List[Dict[str, Any]]) -> str:
+    q = (question or "").lower()
+    if not any(k in q for k in ["전환율", "전환 비율", "conversion rate"]):
+        return ""
+    if not any(k in q for k in ["후원", "완료", "클릭", "purchase", "donation_click"]):
+        return ""
+    if not rows or not isinstance(rows[0], dict):
+        return ""
+
+    event_key = next((k for k in rows[0].keys() if str(k).lower() == "eventname"), None)
+    metric_key = None
+    for k, v in rows[0].items():
+        if _to_number(v) is not None:
+            metric_key = k
+            break
+    if not event_key or not metric_key:
+        return ""
+
+    purchase_cnt = 0.0
+    click_cnt = 0.0
+    for r in rows:
+        e = str(r.get(event_key, "")).strip().lower()
+        v = _to_number(r.get(metric_key)) or 0.0
+        if e == "purchase":
+            purchase_cnt += v
+        elif e == "donation_click":
+            click_cnt += v
+
+    if purchase_cnt <= 0 and click_cnt <= 0:
+        return ""
+
+    if click_cnt > 0:
+        rate = purchase_cnt / click_cnt * 100.0
+        return (
+            "후원 전환율(완료/클릭) 계산 결과입니다.\n"
+            f"- 후원 완료 건수(purchase): **{_format_value(purchase_cnt, '회')}**\n"
+            f"- 후원 클릭 건수(donation_click): **{_format_value(click_cnt, '회')}**\n"
+            f"- 전환율: **{rate:.1f}%**"
+        )
+    return (
+        "후원 전환율(완료/클릭)을 계산하려면 donation_click 데이터가 필요합니다.\n"
+        f"- 후원 완료 건수(purchase): **{_format_value(purchase_cnt, '회')}**"
+    )
+
+
 def _build_week_compare_message(question: str, rows: List[Dict[str, Any]]) -> str:
     q = (question or "").lower()
     if not ("지난주" in q and ("그 전주" in q or "전주" in q)):
@@ -946,7 +991,7 @@ def adapt_pipeline_response_to_legacy(
         fallback = pipeline_response.get("message")
         if fallback:
             if "0개 블록 분석 완료" in str(fallback):
-                fallback = "질문 의도는 이해했지만 현재 데이터에서 조건에 맞는 항목을 찾지 못했습니다. 기준(기간/프로그램명/이벤트명)을 조금 넓혀 다시 확인해 주세요."
+                fallback = "요청하신 조건으로는 데이터를 찾지 못했어요. 기간이나 기준을 조금 넓혀 다시 볼까요?"
             return {
                 "message": fallback,
                 "raw_data": [],
@@ -956,15 +1001,15 @@ def adapt_pipeline_response_to_legacy(
                 "matching_debug": matching_debug
             }
         return {
-            "message": "질문 의도는 이해했지만 현재 조건에서 조회된 데이터가 없습니다. 기간이나 지표를 바꿔 다시 질문해 주세요.",
+            "message": "지금 조건에서는 조회된 데이터가 없어요. 기간이나 지표를 바꿔서 다시 확인해볼게요.",
             "raw_data": [],
             "structured": {},
             "plot_data": [],
             "matching_debug": matching_debug,
             "followup_suggestions": [
-                "기간을 넓혀서 다시 조회할까요?",
-                "지표를 바꿔서 확인해볼까요?",
-                "차원별(예: 채널별)로 나눠 볼까요?"
+                "기간을 넓혀서 다시 볼까요?",
+                "지표를 바꿔서 다시 확인해볼까요?",
+                "채널별/상품별처럼 기준을 바꿔볼까요?"
             ]
         }
     
@@ -1076,6 +1121,9 @@ def adapt_pipeline_response_to_legacy(
     conversion_msg = _build_donation_type_conversion_message(question, raw_data)
     if conversion_msg:
         message_parts = [conversion_msg] + message_parts
+    purchase_conversion_msg = _build_purchase_completion_conversion_message(question, raw_data)
+    if purchase_conversion_msg:
+        message_parts = [purchase_conversion_msg] + message_parts
     profile_msg = _build_item_profile_message(question, raw_data)
     if profile_msg:
         message_parts = [profile_msg] + message_parts
