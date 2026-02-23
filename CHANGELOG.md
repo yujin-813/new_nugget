@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.9.5 - 2026-02-23
+- Fixed follow-up misclassification for summary queries:
+- `지난주 요약` style questions are now treated as new analysis (not stale follow-up).
+- Summary intent normalization added:
+- Time-scoped summary requests are rewritten to executable KPI bundles (users + revenue + top events).
+- Guardrail tuning:
+- Reduced over-blocking on summary and channel+user queries.
+- Improved GA4 routing for channel user requests:
+- Channel/user style questions now avoid repetitive source-choice loops more reliably.
+
 ## v0.9.4 - 2026-02-23
 - Follow-up recommendation quality improved:
 - Converted vague suggestions into directly executable prompts (e.g., channel/source/period split queries).

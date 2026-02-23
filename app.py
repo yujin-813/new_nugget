@@ -337,6 +337,12 @@ def _rewrite_ga_question_for_retry(question: str) -> str:
     elif "이번주" in lq or "이번 주" in lq:
         period = "이번주 "
 
+    is_summary = any(k in lq for k in ["요약", "정리", "브리핑", "한눈", "overview"])
+    if is_summary and ("채널" in lq or "소스" in lq or "매체" in lq):
+        return f"{period}채널별 활성 사용자와 채널별 구매 수익을 요약해줘".strip()
+    if is_summary:
+        return f"{period}활성 사용자 수, 구매 수익, 이벤트 TOP 10을 요약해줘".strip()
+
     if "사용자" in lq and any(k in lq for k in ["추이", "트렌드", "흐름"]):
         return f"{period}활성 사용자 추이 알려줘".strip()
     if "사용자" in lq:
@@ -347,6 +353,16 @@ def _rewrite_ga_question_for_retry(question: str) -> str:
         return f"{period}세션 수 알려줘".strip()
     if "이벤트" in lq and "클릭" in lq:
         return f"{period}이벤트 클릭 수 알려줘".strip()
+    return q
+
+
+def _normalize_summary_request(question: str) -> str:
+    q = str(question or "").strip()
+    lq = q.lower()
+    # "지난주 요약" 류 질문을 실행 가능한 다중 KPI 질의로 정규화
+    if any(k in lq for k in ["요약", "정리", "브리핑", "한눈"]):
+        if any(k in lq for k in ["지난주", "이번주", "지난달", "이번달", "오늘", "어제"]):
+            return _rewrite_ga_question_for_retry(q)
     return q
 
 
@@ -451,6 +467,11 @@ def _apply_bad_regression_guard(user_id: str, question: str, response: Any) -> A
     qsig = _intent_signature(question)
     rsig = _intent_signature(message)
 
+    # 요약/브리핑형 질문은 guardrail 과개입을 피함
+    lq = (question or "").lower()
+    if any(k in lq for k in ["요약", "정리", "브리핑", "한눈"]):
+        return response
+
     mismatch = False
     if qsig["revenue"] and (rsig["user"] and not rsig["revenue"]):
         mismatch = True
@@ -458,6 +479,9 @@ def _apply_bad_regression_guard(user_id: str, question: str, response: Any) -> A
         mismatch = True
     if qsig["channel"] and (not rsig["channel"] and not rsig["event"]):
         mismatch = True
+    # 채널+사용자 질문은 대개 집계 축 문제라 과도한 차단 방지
+    if qsig["channel"] and qsig["user"]:
+        mismatch = False
     if qsig["trend"] and ("기준 기간은" in message and "추이" not in message):
         mismatch = True
 
@@ -2020,6 +2044,7 @@ def ask_question():
     try:
         data = request.get_json()
         question = (data.get('question') or "").strip()
+        question = _normalize_summary_request(question)
         beginner_mode = bool(data.get("beginner_mode", False))
         session["beginner_mode"] = beginner_mode
 

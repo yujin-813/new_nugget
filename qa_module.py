@@ -1511,10 +1511,22 @@ def process_ga4_visualization(question):
 def is_followup_question(question: str) -> bool:
     q = question.strip().lower()
 
+    # 0) 기간/지표/차원 신호가 있으면 follow-up보다 "새 분석"을 우선
+    period_or_compare = [
+        "지난주", "이번주", "지난달", "이번달", "어제", "오늘",
+        "기간", "부터", "까지", "전주 대비", "비교", "증감", "추이", "일별", "월별"
+    ]
+    metric_or_dim = [
+        "매출", "수익", "구매", "사용자", "유저", "세션", "이벤트", "클릭",
+        "채널", "소스", "매체", "경로", "유입", "전환", "상품", "아이템"
+    ]
+    if any(k in q for k in period_or_compare) or any(k in q for k in metric_or_dim):
+        return False
+
     # 1) 강한 followup 트리거 (이건 무조건 followup)
     strong_followup = [
         "아까", "방금", "이전", "전 내용", "전꺼", "그거", "이거",
-        "다시", "재설명", "정리", "요약", "더 자세히", "왜", "원인"
+        "다시", "재설명", "더 자세히", "왜", "원인"
     ]
     if any(k in q for k in strong_followup):
         return True
@@ -1523,11 +1535,7 @@ def is_followup_question(question: str) -> bool:
     #    아래 조건 중 하나라도 만족하면 "새 분석"으로 본다.
 
     # 새 분석을 의미하는 강한 키워드
-    new_analysis_keywords = [
-        "지난주", "이번주", "지난달", "이번달", "어제", "오늘",
-        "기간", "부터", "까지", "전주 대비", "비교", "증감",
-        "추이", "일별", "월별"
-    ]
+    new_analysis_keywords = period_or_compare
 
     # GA4 지표/차원 키워드 (이게 있으면 새 분석일 확률이 큼)
     metric_keywords = [
