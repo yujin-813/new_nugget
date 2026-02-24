@@ -4,7 +4,7 @@ import logging
 import os
 import re
 from datetime import datetime
-from typing import Dict, Any
+from typing import Dict, Any, List, Optional
 
 # DB Path - Absolute Path Fix
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -114,6 +114,57 @@ class DBManager:
                         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                         UNIQUE(user_id, channel, name)
+                    )''')
+
+        # 11. intelligence_runs table (feature/signal/scoring snapshot)
+        c.execute('''CREATE TABLE IF NOT EXISTS intelligence_runs (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        company_id TEXT,
+                        user_id TEXT,
+                        conversation_id TEXT,
+                        source TEXT,
+                        payload_json TEXT,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                    )''')
+
+        # 12. action_experiments table (execution mode tracking)
+        c.execute('''CREATE TABLE IF NOT EXISTS action_experiments (
+                        experiment_id TEXT PRIMARY KEY,
+                        company_id TEXT,
+                        run_id INTEGER,
+                        signal_type TEXT,
+                        primary_metric TEXT,
+                        baseline_value REAL,
+                        expected_direction TEXT,
+                        related_dimensions_json TEXT,
+                        evaluation_date TEXT,
+                        status TEXT DEFAULT 'planned',
+                        result_json TEXT,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                    )''')
+
+        # 13. insight_feedback table (selection/rejection/success loop)
+        c.execute('''CREATE TABLE IF NOT EXISTS insight_feedback (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        company_id TEXT,
+                        run_id INTEGER,
+                        experiment_id TEXT,
+                        signal_type TEXT,
+                        selected INTEGER DEFAULT 0,
+                        rejected INTEGER DEFAULT 0,
+                        experiment_success INTEGER,
+                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+                    )''')
+
+        # 14. insight_weights table (company-specific signal weights)
+        c.execute('''CREATE TABLE IF NOT EXISTS insight_weights (
+                        company_id TEXT,
+                        signal_type TEXT,
+                        base_weight REAL DEFAULT 0.0,
+                        weight REAL DEFAULT 0.0,
+                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        PRIMARY KEY(company_id, signal_type)
                     )''')
 
         # Backward-compatible migration
@@ -1167,3 +1218,365 @@ class DBManager:
         except Exception as e:
             logging.error(f"[DBManager] Failed to delete webhook preset: {e}")
             return False
+
+    @staticmethod
+    def _default_signal_weights() -> Dict[str, float]:
+        return {
+            "kpi_drop": 1.0,
+            "kpi_rise": 0.8,
+            "efficiency_distortion": 1.2,
+            "contribution_shift": 1.0,
+            "funnel_break": 1.2,
+            "opportunity_segment": 0.9,
+        }
+
+    @staticmethod
+    def ensure_company_signal_weights(company_id: str):
+        cid = str(company_id or "default").strip() or "default"
+        defaults = DBManager._default_signal_weights()
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            for signal_type, base in defaults.items():
+                c.execute(
+                    """
+                    INSERT OR IGNORE INTO insight_weights
+                    (company_id, signal_type, base_weight, weight, updated_at)
+                    VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    """,
+                    (cid, signal_type, float(base), float(base)),
+                )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logging.error(f"[DBManager] Failed to ensure company signal weights: {e}")
+
+    @staticmethod
+    def get_company_signal_weights(company_id: str) -> Dict[str, float]:
+        cid = str(company_id or "default").strip() or "default"
+        DBManager.ensure_company_signal_weights(cid)
+        weights: Dict[str, float] = {}
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            c.execute(
+                """
+                SELECT signal_type, weight
+                FROM insight_weights
+                WHERE company_id = ?
+                """,
+                (cid,),
+            )
+            for signal_type, weight in (c.fetchall() or []):
+                weights[str(signal_type)] = float(weight or 0.0)
+            conn.close()
+        except Exception as e:
+            logging.error(f"[DBManager] Failed to get company signal weights: {e}")
+        if not weights:
+            weights = DBManager._default_signal_weights()
+        return weights
+
+    @staticmethod
+    def get_signal_weight_snapshot(company_id: str) -> List[Dict[str, Any]]:
+        cid = str(company_id or "default").strip() or "default"
+        DBManager.ensure_company_signal_weights(cid)
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            c.execute(
+                """
+                SELECT signal_type, base_weight, weight, updated_at
+                FROM insight_weights
+                WHERE company_id = ?
+                ORDER BY signal_type ASC
+                """,
+                (cid,),
+            )
+            rows = c.fetchall() or []
+            conn.close()
+            return [
+                {
+                    "signal_type": str(r[0]),
+                    "base_weight": float(r[1] or 0.0),
+                    "weight": float(r[2] or 0.0),
+                    "updated_at": r[3],
+                }
+                for r in rows
+            ]
+        except Exception as e:
+            logging.error(f"[DBManager] Failed to get signal weight snapshot: {e}")
+            return []
+
+    @staticmethod
+    def save_intelligence_run(
+        company_id: str,
+        user_id: str,
+        conversation_id: str,
+        source: str,
+        payload: Dict[str, Any],
+    ) -> Optional[int]:
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            c.execute(
+                """
+                INSERT INTO intelligence_runs
+                (company_id, user_id, conversation_id, source, payload_json, created_at)
+                VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """,
+                (
+                    str(company_id or "default"),
+                    str(user_id or "anonymous"),
+                    str(conversation_id or ""),
+                    str(source or "unknown"),
+                    json.dumps(payload or {}, ensure_ascii=False),
+                ),
+            )
+            run_id = c.lastrowid
+            conn.commit()
+            conn.close()
+            return int(run_id)
+        except Exception as e:
+            logging.error(f"[DBManager] Failed to save intelligence run: {e}")
+            return None
+
+    @staticmethod
+    def get_intelligence_run(run_id: int) -> Optional[Dict[str, Any]]:
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            c.execute(
+                """
+                SELECT id, company_id, user_id, conversation_id, source, payload_json, created_at
+                FROM intelligence_runs
+                WHERE id = ?
+                """,
+                (int(run_id),),
+            )
+            row = c.fetchone()
+            conn.close()
+            if not row:
+                return None
+            return {
+                "id": int(row[0]),
+                "company_id": str(row[1] or "default"),
+                "user_id": str(row[2] or "anonymous"),
+                "conversation_id": str(row[3] or ""),
+                "source": str(row[4] or "unknown"),
+                "payload": json.loads(row[5] or "{}"),
+                "created_at": row[6],
+            }
+        except Exception as e:
+            logging.error(f"[DBManager] Failed to get intelligence run: {e}")
+            return None
+
+    @staticmethod
+    def create_action_experiment(
+        experiment_id: str,
+        company_id: str,
+        run_id: int,
+        signal_type: str,
+        primary_metric: str,
+        baseline_value: float,
+        expected_direction: str,
+        related_dimensions: List[str],
+        evaluation_date: str,
+    ) -> bool:
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            c.execute(
+                """
+                INSERT OR REPLACE INTO action_experiments
+                (experiment_id, company_id, run_id, signal_type, primary_metric, baseline_value,
+                 expected_direction, related_dimensions_json, evaluation_date, status, result_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                """,
+                (
+                    str(experiment_id),
+                    str(company_id or "default"),
+                    int(run_id) if run_id is not None else None,
+                    str(signal_type or ""),
+                    str(primary_metric or ""),
+                    float(baseline_value or 0.0),
+                    str(expected_direction or ""),
+                    json.dumps(related_dimensions or [], ensure_ascii=False),
+                    str(evaluation_date or ""),
+                ),
+            )
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            logging.error(f"[DBManager] Failed to create action experiment: {e}")
+            return False
+
+    @staticmethod
+    def get_action_experiment(experiment_id: str) -> Optional[Dict[str, Any]]:
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            c.execute(
+                """
+                SELECT experiment_id, company_id, run_id, signal_type, primary_metric, baseline_value,
+                       expected_direction, related_dimensions_json, evaluation_date, status, result_json,
+                       created_at, updated_at
+                FROM action_experiments
+                WHERE experiment_id = ?
+                """,
+                (str(experiment_id),),
+            )
+            row = c.fetchone()
+            conn.close()
+            if not row:
+                return None
+            return {
+                "experiment_id": str(row[0]),
+                "company_id": str(row[1] or "default"),
+                "run_id": int(row[2]) if row[2] is not None else None,
+                "signal_type": str(row[3] or ""),
+                "primary_metric": str(row[4] or ""),
+                "baseline_value": float(row[5] or 0.0),
+                "expected_direction": str(row[6] or ""),
+                "related_dimensions": json.loads(row[7] or "[]"),
+                "evaluation_date": str(row[8] or ""),
+                "status": str(row[9] or "planned"),
+                "result": json.loads(row[10]) if row[10] else None,
+                "created_at": row[11],
+                "updated_at": row[12],
+            }
+        except Exception as e:
+            logging.error(f"[DBManager] Failed to get action experiment: {e}")
+            return None
+
+    @staticmethod
+    def update_action_experiment_result(experiment_id: str, result: Dict[str, Any], status: str = "evaluated") -> bool:
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            c.execute(
+                """
+                UPDATE action_experiments
+                SET result_json = ?, status = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE experiment_id = ?
+                """,
+                (json.dumps(result or {}, ensure_ascii=False), str(status or "evaluated"), str(experiment_id)),
+            )
+            updated = c.rowcount or 0
+            conn.commit()
+            conn.close()
+            return updated > 0
+        except Exception as e:
+            logging.error(f"[DBManager] Failed to update action experiment result: {e}")
+            return False
+
+    @staticmethod
+    def log_insight_feedback(
+        company_id: str,
+        signal_type: str,
+        selected: bool = False,
+        rejected: bool = False,
+        experiment_success: Optional[bool] = None,
+        experiment_id: Optional[str] = None,
+        run_id: Optional[int] = None,
+    ) -> bool:
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            c.execute(
+                """
+                INSERT INTO insight_feedback
+                (company_id, run_id, experiment_id, signal_type, selected, rejected, experiment_success, timestamp)
+                VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """,
+                (
+                    str(company_id or "default"),
+                    int(run_id) if run_id is not None else None,
+                    str(experiment_id) if experiment_id else None,
+                    str(signal_type or ""),
+                    1 if bool(selected) else 0,
+                    1 if bool(rejected) else 0,
+                    None if experiment_success is None else (1 if bool(experiment_success) else 0),
+                ),
+            )
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            logging.error(f"[DBManager] Failed to log insight feedback: {e}")
+            return False
+
+    @staticmethod
+    def get_run_rejected_signal_types(run_id: int) -> List[str]:
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            c.execute(
+                """
+                SELECT DISTINCT signal_type
+                FROM insight_feedback
+                WHERE run_id = ? AND rejected = 1 AND signal_type IS NOT NULL
+                """,
+                (int(run_id),),
+            )
+            rows = c.fetchall() or []
+            conn.close()
+            return [str(r[0]) for r in rows if r and r[0]]
+        except Exception as e:
+            logging.error(f"[DBManager] Failed to get run rejected signal types: {e}")
+            return []
+
+    @staticmethod
+    def recalculate_signal_weights(company_id: str) -> List[Dict[str, Any]]:
+        cid = str(company_id or "default").strip() or "default"
+        DBManager.ensure_company_signal_weights(cid)
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+
+            c.execute(
+                """
+                SELECT signal_type, base_weight
+                FROM insight_weights
+                WHERE company_id = ?
+                """,
+                (cid,),
+            )
+            base_rows = c.fetchall() or []
+            for signal_type, base_weight in base_rows:
+                st = str(signal_type or "")
+                base = float(base_weight or 0.0)
+                c.execute(
+                    """
+                    SELECT
+                        COALESCE(SUM(CASE WHEN selected = 1 THEN 1 ELSE 0 END), 0),
+                        COALESCE(SUM(CASE WHEN rejected = 1 THEN 1 ELSE 0 END), 0),
+                        COALESCE(SUM(CASE WHEN experiment_success = 1 THEN 1 ELSE 0 END), 0)
+                    FROM insight_feedback
+                    WHERE company_id = ? AND signal_type = ?
+                    """,
+                    (cid, st),
+                )
+                cnt = c.fetchone() or (0, 0, 0)
+                selection_count, rejection_count, success_count = [int(x or 0) for x in cnt]
+                new_weight = (
+                    base
+                    + (selection_count * 0.1)
+                    - (rejection_count * 0.1)
+                    + (success_count * 0.2)
+                )
+                c.execute(
+                    """
+                    UPDATE insight_weights
+                    SET weight = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE company_id = ? AND signal_type = ?
+                    """,
+                    (float(new_weight), cid, st),
+                )
+
+            conn.commit()
+            conn.close()
+            return DBManager.get_signal_weight_snapshot(cid)
+        except Exception as e:
+            logging.error(f"[DBManager] Failed to recalculate signal weights: {e}")
+            return DBManager.get_signal_weight_snapshot(cid)

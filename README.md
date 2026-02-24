@@ -268,6 +268,65 @@ OAUTH_REDIRECT_URI=https://<your-trycloudflare-domain>/oauth2callback
 - UI의 `JANDI 전송` 버튼 또는 `POST /export_report/jandi`
 - 요청 바디에 `webhook_url`을 직접 넣어 override 가능
 
+## Marketing Intelligence Engine v1 API
+
+Deterministic 분석 엔진으로 `Top Action Card 1장`만 반환합니다.
+
+### 1) 분석 실행
+`POST /intelligence/analyze`
+
+요청 예시:
+```json
+{
+  "company_id": "childfund-kr",
+  "source": "ga4",
+  "conversation_id": "optional-conv-id",
+  "data": {
+    "current_rows": [
+      {"date":"2026-02-10","activeUsers":1000,"sessions":1500,"purchaseRevenue":50000,"channel":"Direct"}
+    ],
+    "previous_rows": [
+      {"date":"2026-02-03","activeUsers":1200,"sessions":1700,"purchaseRevenue":62000,"channel":"Direct"}
+    ]
+  }
+}
+```
+
+`data`를 생략하면 `conversation_id + source` 기준으로 마지막 분석 `raw_data`를 자동 로드합니다.
+
+### 2) Action Card 선택 (실행 설계 생성)
+`POST /intelligence/action/select`
+```json
+{
+  "company_id": "childfund-kr",
+  "run_id": 12
+}
+```
+
+### 3) Action Card 리젝 (다음 카드 제시)
+`POST /intelligence/action/reject`
+```json
+{
+  "company_id": "childfund-kr",
+  "run_id": 12
+}
+```
+
+### 4) 실험 평가
+`POST /intelligence/evaluate`
+```json
+{
+  "experiment_id": "exp-uuid",
+  "current_value": 2.31,
+  "side_effect_metric_changes": {
+    "engagementRate": -3.0
+  }
+}
+```
+
+### 5) 회사별 가중치 조회
+`GET /intelligence/weights?company_id=childfund-kr`
+
 ## 라이선스
 
 MIT License

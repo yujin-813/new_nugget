@@ -38,6 +38,73 @@
             background: #3cb54a;
         }
 
+        .action-card-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+
+        .action-badge {
+            font-size: 11px;
+            padding: 3px 8px;
+            border-radius: 999px;
+            border: 1px solid #dbe6ff;
+            background: #eef4ff;
+            color: #2f4f8f;
+            font-weight: 700;
+        }
+
+        .risk-high {
+            color: #b42318;
+            background: #fff2f1;
+            border: 1px solid #ffd5d2;
+            border-radius: 8px;
+            display: inline-block;
+            padding: 4px 8px;
+            font-size: 12px;
+            margin-top: 4px;
+        }
+
+        .risk-medium {
+            color: #8a5a00;
+            background: #fff8e8;
+            border: 1px solid #ffe4a8;
+            border-radius: 8px;
+            display: inline-block;
+            padding: 4px 8px;
+            font-size: 12px;
+            margin-top: 4px;
+        }
+
+        .risk-low {
+            color: #17643c;
+            background: #ecfdf3;
+            border: 1px solid #c8f2da;
+            border-radius: 8px;
+            display: inline-block;
+            padding: 4px 8px;
+            font-size: 12px;
+            margin-top: 4px;
+        }
+
+        .action-evidence {
+            margin: 10px 0 0;
+            padding-left: 18px;
+            color: #3c4a60;
+            line-height: 1.6;
+            font-size: 13px;
+        }
+
+        .action-exec-list {
+            margin: 10px 0 0;
+            padding-left: 18px;
+            color: #2f3f5f;
+            line-height: 1.6;
+            font-size: 13px;
+        }
+
         /* [FIX] Report Chart Responsive */
         .pivot-table-wrap {
             margin-top: 10px;
@@ -1240,6 +1307,7 @@
                                 <button class="quick-chip" onclick="setInputAndAsk('지난주 요약 알려줘')">지난주 요약</button>
                                 <button class="quick-chip" onclick="setInputAndAsk('매출 top 알려줘')">매출 TOP</button>
                                 <button class="quick-chip" onclick="setInputAndAsk('유입 분석해줘')">유입 분석</button>
+                                <button class="quick-chip" onclick="runMarketingIntelligence()">실행 카드 1장</button>
                             </div>
                             <div id="disconnected-actions" class="quick-chip-wrap">
                                 <button class="quick-chip" onclick="openConnectModal()">데이터 연결하기</button>
@@ -1472,6 +1540,10 @@
         let savedReports = [];
         let lastAskedQuestion = '';
         let lastKnownPeriodText = '';
+        let lastRouteHint = '';
+        let lastIntelligenceRunId = null;
+        let lastIntelligenceCard = null;
+        let lastExperimentPlan = null;
 
         /* =========================
            1. 기본 초기화 및 UI 제어
@@ -1835,6 +1907,7 @@
                     const badge = document.getElementById('mode-status-badge');
                     badge.innerText = `Mode: ${String(data.route).toUpperCase()}`;
                     badge.classList.add('active');
+                    lastRouteHint = String(data.route || '').toLowerCase();
                 }
                 refreshReportSnapshotCard();
 
@@ -1843,6 +1916,237 @@
             } finally {
                 isFetching = false;
                 document.getElementById('ask-button').disabled = false;
+            }
+        }
+
+        function getPreferredIntelligenceSource() {
+            if (lastRouteHint === 'mixed') return 'mixed';
+            if (lastRouteHint === 'file') return 'file';
+            if (lastRouteHint === 'ga4' || lastRouteHint === 'ga4_followup') return 'ga4';
+            const ga4Badge = document.getElementById('ga4-status-badge');
+            const fileBadge = document.getElementById('file-status-badge');
+            const ga4Connected = !!ga4Badge && ga4Badge.classList.contains('active') && !/GA4:\s*None/i.test(ga4Badge.innerText || '');
+            const fileConnected = !!fileBadge && fileBadge.classList.contains('active') && !/File:\s*None/i.test(fileBadge.innerText || '');
+            if (ga4Connected && fileConnected) return 'mixed';
+            if (fileConnected) return 'file';
+            return 'ga4';
+        }
+
+        function riskClass(level) {
+            const v = String(level || '').toLowerCase();
+            if (v === 'high') return 'risk-high';
+            if (v === 'low') return 'risk-low';
+            return 'risk-medium';
+        }
+
+        function runMarketingIntelligence() {
+            if (!isDataConnected()) {
+                appendMessage('bot', '먼저 데이터를 연결해 주세요. 연결 후 실행 카드 1장을 제안해드릴게요.');
+                return;
+            }
+            const onboarding = document.getElementById('onboarding-ui');
+            if (onboarding) onboarding.classList.add('hidden');
+            appendMessage('user', '이번 주 실행 카드 1장 제안해줘');
+            const source = getPreferredIntelligenceSource();
+            fetch('/intelligence/analyze', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ source })
+            }).then(async (res) => {
+                const data = await res.json();
+                if (!res.ok || !data.success) {
+                    const msg = (data && data.error) ? String(data.error) : '실행 카드 분석에 실패했습니다.';
+                    appendMessage('bot', msg);
+                    return;
+                }
+                lastIntelligenceRunId = data.run_id || null;
+                lastIntelligenceCard = data.top_action_card || null;
+                if (!lastIntelligenceCard) {
+                    appendMessage('bot', '현재 기준으로 우선 실행할 카드가 없습니다. 기간을 넓히거나 지표를 지정해 다시 시도해 주세요.');
+                    return;
+                }
+                renderIntelligenceActionCard(lastIntelligenceCard, lastIntelligenceRunId, data);
+            }).catch((err) => {
+                appendMessage('bot', '실행 카드 분석 중 오류가 발생했습니다: ' + err.message);
+            });
+        }
+
+        function renderIntelligenceActionCard(cardData, runId, rawData = null) {
+            const chat = document.getElementById('chat');
+            const card = document.createElement('div');
+            card.className = 'analysis-card';
+            const evidence = Array.isArray(cardData.evidence) ? cardData.evidence : [];
+            const recs = Array.isArray(cardData.recommended_executions) ? cardData.recommended_executions : [];
+            const risk = String(cardData.risk_level || 'Medium');
+            const quality = rawData && Number.isFinite(Number(rawData.signal_count)) ? Number(rawData.signal_count) : null;
+            const source = rawData && rawData.source ? String(rawData.source).toUpperCase() : '';
+            card.innerHTML = `
+                <div class="action-card-head">
+                    <h3>🎯 ${escapeHtml(cardData.title || 'Top Action Card')}</h3>
+                    <span class="action-badge">Top 1 Action</span>
+                </div>
+                <div style="font-size:13px;color:#405069;line-height:1.6;">${escapeHtml(cardData.problem_summary || '')}</div>
+                <div class="${riskClass(risk)}">Risk: ${escapeHtml(risk)}</div>
+                <ul class="action-evidence">${evidence.map(x => `<li>${escapeHtml(String(x))}</li>`).join('')}</ul>
+                <div style="margin-top:10px;font-size:13px;color:#2f3f5f;"><strong>기대 효과:</strong> ${escapeHtml(String(cardData.expected_impact_range || '-'))}</div>
+                <ul class="action-exec-list">${recs.map(x => `<li>${escapeHtml(String(x))}</li>`).join('')}</ul>
+                <div style="margin-top:10px;font-size:11px;color:#6f7d93;">${quality !== null ? `신호 ${quality}개 중 우선순위 1개` : ''}${source ? ` · source: ${escapeHtml(source)}` : ''}</div>
+            `;
+
+            const actions = document.createElement('div');
+            actions.className = 'card-actions';
+
+            const selectBtn = document.createElement('button');
+            selectBtn.className = 'add-to-report';
+            selectBtn.innerHTML = '<i class="fas fa-check"></i> 실행 선택';
+            selectBtn.onclick = () => selectIntelligenceAction(runId, cardData, selectBtn);
+            actions.appendChild(selectBtn);
+
+            const rejectBtn = document.createElement('button');
+            rejectBtn.className = 'add-to-report';
+            rejectBtn.style.background = '#f59f00';
+            rejectBtn.innerHTML = '<i class="fas fa-times"></i> 이번 카드 리젝';
+            rejectBtn.onclick = () => rejectIntelligenceAction(runId, cardData, rejectBtn);
+            actions.appendChild(rejectBtn);
+
+            const reportBtn = document.createElement('button');
+            reportBtn.className = 'add-to-report';
+            reportBtn.style.background = '#4c6fff';
+            reportBtn.innerHTML = '<i class="fas fa-file-alt"></i> 리포트에 추가';
+            reportBtn.onclick = () => {
+                addToReport(getReportSafeHtml(card), null);
+                openReportPanel();
+            };
+            actions.appendChild(reportBtn);
+
+            card.appendChild(actions);
+            chat.appendChild(card);
+            chat.scrollTop = chat.scrollHeight;
+        }
+
+        function renderExecutionPlanCard(experiment, weightRows = []) {
+            const chat = document.getElementById('chat');
+            const card = document.createElement('div');
+            card.className = 'analysis-card';
+            const checklist = Array.isArray(experiment.execution_checklist) ? experiment.execution_checklist : [];
+            card.innerHTML = `
+                <h3>🧪 실행 설계 생성 완료</h3>
+                <div style="font-size:13px;color:#2f3f5f;line-height:1.6;">
+                    <div><strong>Primary Metric:</strong> ${escapeHtml(String(experiment.primary_metric || '-'))}</div>
+                    <div><strong>Baseline:</strong> ${escapeHtml(String(experiment.baseline_value ?? '-'))}</div>
+                    <div><strong>Expected:</strong> ${escapeHtml(String(experiment.expected_direction || '-'))}</div>
+                    <div><strong>Evaluation Date:</strong> ${escapeHtml(String(experiment.evaluation_date || '-'))}</div>
+                    <div style="margin-top:8px;"><strong>가설:</strong> ${escapeHtml(String(experiment.hypothesis || '-'))}</div>
+                    <div><strong>성공 기준:</strong> ${escapeHtml(String(experiment.success_criteria || '-'))}</div>
+                    <div><strong>예상 Uplift:</strong> ${escapeHtml(String(experiment.expected_uplift || '-'))}</div>
+                </div>
+                <ul class="action-exec-list">${checklist.map(x => `<li>${escapeHtml(String(x))}</li>`).join('')}</ul>
+                <div style="margin-top:10px;font-size:11px;color:#6f7d93;">
+                    ${Array.isArray(weightRows) && weightRows.length > 0 ? `가중치 업데이트 반영됨 (${weightRows.length}개 signal)` : ''}
+                </div>
+            `;
+            const actions = document.createElement('div');
+            actions.className = 'card-actions';
+            const evalBtn = document.createElement('button');
+            evalBtn.className = 'add-to-report';
+            evalBtn.style.background = '#17643c';
+            evalBtn.innerHTML = '<i class="fas fa-chart-line"></i> 실험 결과 평가';
+            evalBtn.onclick = () => evaluateIntelligenceExperiment(experiment);
+            actions.appendChild(evalBtn);
+            card.appendChild(actions);
+            chat.appendChild(card);
+            chat.scrollTop = chat.scrollHeight;
+        }
+
+        async function selectIntelligenceAction(runId, cardData, btn) {
+            if (btn) btn.disabled = true;
+            try {
+                const res = await fetch('/intelligence/action/select', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        run_id: runId,
+                        action_card: cardData
+                    })
+                });
+                const data = await res.json();
+                if (!res.ok || !data.success) {
+                    appendMessage('bot', (data && data.error) ? String(data.error) : '실행 선택 처리에 실패했습니다.');
+                    return;
+                }
+                lastExperimentPlan = data.experiment || null;
+                renderExecutionPlanCard(data.experiment || {}, data.updated_weights || []);
+            } catch (err) {
+                appendMessage('bot', '실행 선택 중 오류가 발생했습니다: ' + err.message);
+            } finally {
+                if (btn) btn.disabled = false;
+            }
+        }
+
+        async function rejectIntelligenceAction(runId, cardData, btn) {
+            if (btn) btn.disabled = true;
+            try {
+                const signalType = (((cardData || {}).signal || {}).signal_type) || '';
+                const res = await fetch('/intelligence/action/reject', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        run_id: runId,
+                        signal_type: signalType
+                    })
+                });
+                const data = await res.json();
+                if (!res.ok || !data.success) {
+                    appendMessage('bot', (data && data.error) ? String(data.error) : '카드 리젝 처리에 실패했습니다.');
+                    return;
+                }
+                if (data.next_action_card) {
+                    renderIntelligenceActionCard(data.next_action_card, runId, { signal_count: null, source: getPreferredIntelligenceSource() });
+                } else {
+                    appendMessage('bot', data.message || '추가 Action Card가 없습니다. 새로운 기간/지표로 다시 분석해 주세요.');
+                }
+            } catch (err) {
+                appendMessage('bot', '카드 리젝 중 오류가 발생했습니다: ' + err.message);
+            } finally {
+                if (btn) btn.disabled = false;
+            }
+        }
+
+        async function evaluateIntelligenceExperiment(experiment) {
+            const expId = String((experiment || {}).experiment_id || '');
+            const baseline = Number((experiment || {}).baseline_value || 0);
+            if (!expId) {
+                appendMessage('bot', '평가할 experiment_id가 없습니다.');
+                return;
+            }
+            const userInput = window.prompt(`현재 ${experiment.primary_metric || '지표'} 값을 입력해 주세요`, String(baseline || ''));
+            if (userInput === null) return;
+            const currentValue = Number(String(userInput).replace(/[^\d.-]/g, ''));
+            if (!Number.isFinite(currentValue)) {
+                appendMessage('bot', '숫자 값으로 입력해 주세요.');
+                return;
+            }
+            try {
+                const res = await fetch('/intelligence/evaluate', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        experiment_id: expId,
+                        current_value: currentValue
+                    })
+                });
+                const data = await res.json();
+                if (!res.ok || !data.success) {
+                    appendMessage('bot', (data && data.error) ? String(data.error) : '실험 평가에 실패했습니다.');
+                    return;
+                }
+                const ev = data.evaluation || {};
+                appendMessage(
+                    'bot',
+                    `실험 평가 완료\n- uplift: ${Number(ev.uplift_pct || 0).toFixed(1)}%\n- success: ${ev.success ? 'YES' : 'NO'}\n- side_effect: ${ev.side_effect || '없음'}`
+                );
+            } catch (err) {
+                appendMessage('bot', '실험 평가 중 오류가 발생했습니다: ' + err.message);
             }
         }
 

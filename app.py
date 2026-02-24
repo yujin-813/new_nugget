@@ -28,12 +28,14 @@ DBManager.init_db()
 import math
 from semantic_matcher import SemanticMatcher
 from ga4_metadata import GA4_METRICS, GA4_DIMENSIONS
+from marketing_intelligence import MarketingIntelligenceEngine, SIGNAL_TYPES
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv()
 semantic = SemanticMatcher(os.path.join(BASE_DIR, "vectorizer.pkl"))
 semantic.build_metric_index(GA4_METRICS)
 semantic.build_dimension_index(GA4_DIMENSIONS)
+marketing_engine = MarketingIntelligenceEngine()
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -151,6 +153,88 @@ def _is_valid_http_url(url: str) -> bool:
         return p.scheme in {"http", "https"} and bool(p.netloc)
     except Exception:
         return False
+
+
+def _normalize_intelligence_source(source: str) -> str:
+    s = str(source or "").strip().lower()
+    if s in {"ga4", "google_analytics"}:
+        return "ga4"
+    if s in {"file", "csv", "xlsx"}:
+        return "file"
+    if s in {"mixed", "hybrid"}:
+        return "mixed"
+    return "ga4"
+
+
+def _extract_rows_from_result_payload(payload: Any) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """
+    Extract current/previous rows from stored result payload.
+    Supports envelopes used in this service:
+      - {raw_data: [...]}
+      - {response: {raw_data: [...]}}
+      - {rows: [...]} / {current_rows:[...], previous_rows:[...]}
+    """
+    if not isinstance(payload, dict):
+        return [], []
+
+    current_rows: List[Dict[str, Any]] = []
+    previous_rows: List[Dict[str, Any]] = []
+
+    if isinstance(payload.get("current_rows"), list):
+        current_rows = [r for r in payload.get("current_rows") if isinstance(r, dict)]
+    elif isinstance(payload.get("raw_data"), list):
+        current_rows = [r for r in payload.get("raw_data") if isinstance(r, dict)]
+    elif isinstance(payload.get("rows"), list):
+        current_rows = [r for r in payload.get("rows") if isinstance(r, dict)]
+
+    if isinstance(payload.get("previous_rows"), list):
+        previous_rows = [r for r in payload.get("previous_rows") if isinstance(r, dict)]
+    elif isinstance(payload.get("comparison_rows"), list):
+        previous_rows = [r for r in payload.get("comparison_rows") if isinstance(r, dict)]
+    elif isinstance(payload.get("previous_raw_data"), list):
+        previous_rows = [r for r in payload.get("previous_raw_data") if isinstance(r, dict)]
+
+    resp = payload.get("response")
+    if not current_rows and isinstance(resp, dict):
+        if isinstance(resp.get("current_rows"), list):
+            current_rows = [r for r in resp.get("current_rows") if isinstance(r, dict)]
+        elif isinstance(resp.get("raw_data"), list):
+            current_rows = [r for r in resp.get("raw_data") if isinstance(r, dict)]
+        elif isinstance(resp.get("rows"), list):
+            current_rows = [r for r in resp.get("rows") if isinstance(r, dict)]
+
+        if not previous_rows:
+            if isinstance(resp.get("previous_rows"), list):
+                previous_rows = [r for r in resp.get("previous_rows") if isinstance(r, dict)]
+            elif isinstance(resp.get("comparison_rows"), list):
+                previous_rows = [r for r in resp.get("comparison_rows") if isinstance(r, dict)]
+            elif isinstance(resp.get("previous_raw_data"), list):
+                previous_rows = [r for r in resp.get("previous_raw_data") if isinstance(r, dict)]
+
+    return current_rows, previous_rows
+
+
+def _load_intelligence_rows_from_request(
+    body: Dict[str, Any],
+    conversation_id: str,
+    source: str,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], str]:
+    current_rows = []
+    previous_rows = []
+    data = body.get("data")
+    if isinstance(data, dict):
+        current_rows = [r for r in (data.get("current_rows") or data.get("rows") or []) if isinstance(r, dict)]
+        previous_rows = [r for r in (data.get("previous_rows") or data.get("comparison_rows") or []) if isinstance(r, dict)]
+        if current_rows:
+            return current_rows, previous_rows, "request"
+
+    if conversation_id:
+        last = DBManager.load_last_result(conversation_id, source=source) or {}
+        c, p = _extract_rows_from_result_payload(last)
+        if c:
+            return c, p, "last_result"
+
+    return [], [], "none"
 
 
 def _tokenize_text(text: str) -> List[str]:
@@ -384,6 +468,48 @@ def _score_source(question: str, has_ga: bool, has_file: bool, prev_source: str 
     return source, scores
 
 
+def _extract_event_name_filters(question: str) -> List[Dict[str, Any]]:
+    q = str(question or "").lower()
+    event_keywords = [
+        "purchase",
+        "donation_click",
+        "signup",
+        "login",
+        "gnb_click",
+        "lnb_click",
+        "scroll",
+        "footer_click",
+    ]
+    hits: List[str] = []
+    for keyword in event_keywords:
+        boundary_pattern = rf"(^|[^a-z0-9_]){re.escape(keyword)}([^a-z0-9_]|$)"
+        if re.search(boundary_pattern, q) or (keyword in q):
+            if keyword not in hits:
+                hits.append(keyword)
+    if not hits:
+        return []
+    filters = [{"field": "eventName", "op": "=", "value": x} for x in hits]
+    if "만" in q:
+        return filters[:1]
+    return filters
+
+
+def _is_followup_patch_mode(intent_model: Dict[str, Any], previous_state: Dict[str, Any]) -> bool:
+    if not isinstance(intent_model, dict) or not isinstance(previous_state, dict):
+        return False
+    if bool(intent_model.get("correction_mode")):
+        return False
+    prev_action = str(previous_state.get("last_action") or "").upper()
+    action = str(intent_model.get("action") or "").upper()
+    if not prev_action or action != prev_action:
+        return False
+    entities = intent_model.get("entities") if isinstance(intent_model.get("entities"), dict) else {}
+    if entities.get("dimensions"):
+        return False
+    filters = entities.get("filters") if isinstance(entities.get("filters"), list) else []
+    return bool(filters)
+
+
 def _build_intent_model(
     question: str,
     state: Dict[str, Any],
@@ -399,7 +525,7 @@ def _build_intent_model(
 
     metric_candidates = _metric_overrides_from_question(q)
     dim_candidate = _analysis_dimension_modifier(q)
-    filters: List[Dict[str, Any]] = []
+    filters: List[Dict[str, Any]] = _extract_event_name_filters(q)
     segments: List[str] = []
     if any(k in q for k in ["신규", "first"]):
         segments.append("new_users")
@@ -425,6 +551,15 @@ def _build_intent_model(
         return None
 
     summary_scope = _summary_scope_from_text(q)
+
+    # "별"/by/명시 dimension은 SUMMARY보다 BREAKDOWN을 우선
+    if ("별" in q) or bool(re.search(r"\bby\b", q, flags=re.IGNORECASE)) or bool(dim_candidate):
+        action = "BREAKDOWN"
+
+    # 이벤트 필터만 바꾸는 follow-up은 이전 action을 유지(패치 모드 유도)
+    prev_action = str(st.get("last_action") or "").upper()
+    if action == "SUMMARY" and filters and not dim_candidate and prev_action:
+        action = prev_action
 
     if action == "SUMMARY" and not metric_candidates and summary_scope:
         scope_default_metric = {
@@ -610,7 +745,8 @@ def _default_analysis_state() -> Dict[str, Any]:
         "execution_mode": "single",  # single | comparison (runtime only)
         "filters": [],
         "cause_analysis": False,
-        "asked_queries": []
+        "asked_queries": [],
+        "last_action": ""
     }
 
 
@@ -634,6 +770,8 @@ def _coerce_analysis_state(raw: Any) -> Dict[str, Any]:
         out["filters"] = []
     if not isinstance(out.get("asked_queries"), list):
         out["asked_queries"] = []
+    if not isinstance(out.get("last_action"), str):
+        out["last_action"] = ""
     return out
 
 
@@ -772,7 +910,11 @@ def _analysis_dimension_modifier(question: str) -> str:
         return "source"
     if any(k in q for k in ["채널", "channel"]):
         return "defaultChannelGroup"
-    if any(k in q for k in ["상품", "item", "카테고리", "후원명", "donation_name"]):
+    if any(k in q for k in ["후원명", "donation_name"]):
+        if "customEvent:donation_name" in GA4_DIMENSIONS:
+            return "customEvent:donation_name"
+        return "itemName"
+    if any(k in q for k in ["상품", "item", "카테고리"]):
         return "itemName"
     if any(k in q for k in ["국가", "country"]):
         return "country"
@@ -1217,6 +1359,32 @@ def _apply_intent_model_to_state(state: Dict[str, Any], intent_model: Dict[str, 
     action = str(im.get("action") or "")
     entities = im.get("entities") if isinstance(im.get("entities"), dict) else {}
     time_slot = im.get("time") if isinstance(im.get("time"), dict) else {}
+    summary_scope = str(im.get("summary_scope") or "").strip().lower() or None
+    correction_mode = bool(im.get("correction_mode"))
+    patch_mode = _is_followup_patch_mode(im, st)
+
+    if correction_mode:
+        # 교정 모드에서는 기존 상태보다 현재 intent를 우선 적용
+        st["metrics"] = []
+        st["dimensions"] = []
+        st["filters"] = []
+        st["cause_analysis"] = False
+        st["comparison"] = False
+        st["execution_mode"] = "single"
+        st["period"]["previous"] = None
+
+    if patch_mode:
+        # follow-up patch mode: reset이 아니라 기존 metric/dimension 유지 + filter만 교체
+        entity_filters = entities.get("filters") if isinstance(entities.get("filters"), list) else []
+        if entity_filters:
+            st["filters"] = entity_filters
+        st["cause_analysis"] = False
+        st["comparison"] = False
+        st["execution_mode"] = "single"
+        st["period"]["previous"] = None
+        st["last_action"] = str(st.get("last_action") or action or "").upper()
+        st["metrics"] = _dedupe_metrics(st.get("metrics") or ["activeUsers"])
+        return st
 
     # action -> analysis type 매핑
     if action in {"BREAKDOWN", "TREND", "SEGMENT", "DIAGNOSE"} and st.get("analysis_type") == "summary":
@@ -1232,26 +1400,59 @@ def _apply_intent_model_to_state(state: Dict[str, Any], intent_model: Dict[str, 
     # entities 반영
     metrics = entities.get("metrics") if isinstance(entities.get("metrics"), list) else []
     dims = entities.get("dimensions") if isinstance(entities.get("dimensions"), list) else []
+    entity_filters = entities.get("filters") if isinstance(entities.get("filters"), list) else []
+
+    # SUMMARY는 scope 기반 metric 강제 + 이전 dimension 잔존 제거
+    if action == "SUMMARY":
+        scope_map = {
+            "traffic": ["activeUsers", "sessions"],
+            "engagement": ["engagementRate"],
+            "conversion": [m for m in ["conversions", "purchaseConversionRate", "keyEvents"] if m in GA4_METRICS],
+            "revenue": [m for m in ["totalRevenue", "purchaseRevenue"] if m in GA4_METRICS],
+        }
+        scoped_metrics = scope_map.get(summary_scope or "", [])
+        if scoped_metrics:
+            st["metrics"] = _dedupe_metrics(scoped_metrics)
+        if not dims:
+            st["dimensions"] = []
+
     if metrics:
-        st["metrics"] = _metric_swap_from_question(
-            question=" ".join([action] + metrics),
-            current_metrics=_dedupe_metrics(metrics + (st.get("metrics") or [])),
-            metric_append=True,
-        )
+        # SUMMARY에서 scope metric이 이미 고정된 경우에는 entities metric을 병합하지 않음
+        if not (action == "SUMMARY" and summary_scope):
+            if str(action or "").upper() in {"BREAKDOWN", "COMPARE", "WHY", "TREND", "SEGMENT", "DIAGNOSE", "REPORT"}:
+                st["metrics"] = _dedupe_metrics(metrics)
+            else:
+                st["metrics"] = _metric_swap_from_question(
+                    question=" ".join([action] + metrics),
+                    current_metrics=_dedupe_metrics(metrics + (st.get("metrics") or [])),
+                    metric_append=True,
+                )
     if dims:
-        st["dimensions"] = [str(dims[0])]
+        if action != "SUMMARY":
+            st["dimensions"] = [str(dims[0])]
+    if entity_filters:
+        st["filters"] = entity_filters
 
     # time 반영
     mode = str(time_slot.get("mode") or "KEEP_STATE")
     ts = str(time_slot.get("start") or "")
     te = str(time_slot.get("end") or "")
     if mode != "KEEP_STATE" and ts and te:
+        # 명시 시간이 있으면 무조건 교체
         st["period"]["current"] = f"{ts} ~ {te}"
-        st["period"]["symbol"] = None
-        if st.get("comparison"):
+        st["period"]["symbol"] = mode.lower()
+        st["period"]["previous"] = None
+        # 시간 교체 시 비교 잔존 상태 제거(요청 액션이 COMPARE일 때만 재설정)
+        if action != "COMPARE":
+            st["comparison"] = False
+            st["execution_mode"] = "single"
+        if action == "COMPARE":
+            st["comparison"] = True
+            st["execution_mode"] = "comparison"
             st["period"]["previous"] = _previous_period_range(st["period"]["current"])
 
     st["metrics"] = _dedupe_metrics(st.get("metrics") or ["activeUsers"])
+    st["last_action"] = str(action or st.get("last_action") or "").upper()
     return st
 
 
@@ -4583,7 +4784,8 @@ def ask_question():
                 prev_user_q = _build_anchor_query_from_state(current_state)
         question = _merge_with_previous_query(original_question, prev_user_q)
         if likely_ga_question and property_id:
-            question = _build_query_from_analysis_state(original_question, analysis_state)
+            debug_query = _build_query_from_analysis_state(original_question, analysis_state)
+            logging.info(f"[Ask] query_debug={debug_query}")
         question = _normalize_summary_request(question)
         beginner_mode = bool(data.get("beginner_mode", False))
         session["beginner_mode"] = beginner_mode
@@ -4649,45 +4851,10 @@ def ask_question():
             session["current_analysis_state"] = analysis_state
             _save_analysis_state_to_db(conversation_id, analysis_state)
             if _is_likely_ga_data_question(selected_followup_text):
-                question = _build_query_from_analysis_state(selected_followup_text, analysis_state)
+                debug_query = _build_query_from_analysis_state(selected_followup_text, analysis_state)
+                logging.info(f"[Ask] followup_query_debug={debug_query}")
 
-        # 요약 질의는 일반 파서 실패를 줄이기 위해 시작점에서 전용 경로 우선 처리
         response = None
-        if _is_summary_request(original_question) and _is_likely_ga_data_question(original_question) and property_id:
-            response = _build_period_summary_via_simple_queries(
-                question=original_question,
-                property_id=property_id,
-                file_path=file_path,
-                user_id=user_id,
-                conversation_id=conversation_id,
-                semantic=semantic,
-                beginner_mode=bool(session.get("beginner_mode", False))
-            )
-            if not response:
-                response = _direct_ga_summary_fallback(question=original_question, property_id=property_id)
-        # 비교형 매출 질의는 직접 집계 fallback 우선
-        if response is None and property_id:
-            response = _direct_ga_revenue_compare_fallback(
-                question=original_question,
-                property_id=property_id
-            )
-        # 비교 질의는 상태 기반으로 총합/차원 비교를 자동 생성
-        if response is None and property_id:
-            response = _direct_ga_state_compare_fallback(
-                question=original_question,
-                property_id=property_id,
-                state=analysis_state
-            )
-        # 원인 분석은 현재 컨텍스트를 유지한 metric 확장으로 실행
-        if response is None and property_id:
-            response = _direct_ga_cause_analysis_fallback(
-                question=original_question,
-                property_id=property_id,
-                state=analysis_state
-            )
-        # 사용자 추이 질의도 전용 폴백 우선
-        if response is None and property_id:
-            response = _direct_ga_user_trend_fallback(question=original_question, property_id=property_id)
 
         # 사용자 부정 피드백(틀림/이상) 자동 수집
         if _is_negative_feedback_text(question):
@@ -4732,7 +4899,9 @@ def ask_question():
                 user_id=user_id,
                 conversation_id=conversation_id,
                 semantic=semantic,
-                beginner_mode=bool(session.get("beginner_mode", False))
+                beginner_mode=bool(session.get("beginner_mode", False)),
+                intent_model=intent_model,
+                analysis_state=analysis_state
             )
 
         # 결과-의도 불일치 시: 현재 문장 기준으로 상태 재구성 후 1회 자동 재시도
@@ -4744,9 +4913,11 @@ def ask_question():
             logging.info("[Ask] Intent/Result mismatch detected. Rebuild from current sentence and retry once.")
             rebuilt_state = _build_state_from_scratch(original_question, _default_analysis_state())
             analysis_state = rebuilt_state
+            if isinstance(intent_model, dict):
+                analysis_state = _apply_intent_model_to_state(analysis_state, intent_model)
             session["current_analysis_state"] = analysis_state
             _save_analysis_state_to_db(conversation_id, analysis_state)
-            retry_question = _build_query_from_analysis_state(original_question, analysis_state)
+            retry_question = original_question
             response_retry = handle_question(
                 retry_question,
                 property_id=property_id,
@@ -4754,7 +4925,9 @@ def ask_question():
                 user_id=user_id,
                 conversation_id=f"{conversation_id}:mismatch:{uuid.uuid4().hex[:8]}",
                 semantic=semantic,
-                beginner_mode=bool(session.get("beginner_mode", False))
+                beginner_mode=bool(session.get("beginner_mode", False)),
+                intent_model=intent_model,
+                analysis_state=analysis_state
             )
             if not _is_intent_result_mismatch(original_question, response_retry):
                 response = response_retry
@@ -4868,7 +5041,9 @@ def ask_question():
                 user_id=user_id,
                 conversation_id=clean_conv,
                 semantic=semantic,
-                beginner_mode=bool(session.get("beginner_mode", False))
+                beginner_mode=bool(session.get("beginner_mode", False)),
+                intent_model=intent_model,
+                analysis_state=analysis_state
             )
             if not _is_ga_no_match_response(response4):
                 response = response4
@@ -4912,6 +5087,17 @@ def ask_question():
             }
         # 데이터 질문 실패 시에는 "무응답" 대신 실패 조건을 설명
         elif _is_no_data_or_no_match_response(response) and _is_likely_ga_data_question(question):
+            # Empty Result Guard: 연쇄 실패 방지를 위해 차원 우선 해제 후 상태 저장
+            try:
+                dims = list(analysis_state.get("dimensions") or [])
+                if dims:
+                    analysis_state["dimensions"] = []
+                    analysis_state["comparison"] = False
+                    analysis_state["execution_mode"] = "single"
+                    analysis_state["period"]["previous"] = None
+                    _save_analysis_state_to_db(conversation_id, analysis_state)
+            except Exception as _e:
+                logging.warning(f"[Ask] Empty result guard state reset skipped: {_e}")
             response = _build_no_data_explained_response(
                 question=original_question or question,
                 state=analysis_state,
@@ -5023,6 +5209,10 @@ def ask_question():
                         fn = os.path.basename(fp) if fp else "-"
                         prop_name = session.get("property_name") or (property_id or session.get("property_id") or "-")
                         body["data_label"] = f"MIXED · GA4:{prop_name} + FILE:{fn}"
+                if not body.get("period"):
+                    period_from_state = str(((analysis_state or {}).get("period") or {}).get("current") or "").strip()
+                    if period_from_state:
+                        body["period"] = period_from_state
                 sanitized_response["response"] = body
         except Exception:
             pass
@@ -5333,6 +5523,283 @@ def feedback_snapshot():
     except Exception as e:
         logging.error(f"Error getting feedback snapshot: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
+
+
+@app.route('/intelligence/analyze', methods=['POST'])
+def intelligence_analyze():
+    """
+    Deterministic marketing intelligence analysis:
+    data -> feature layer -> signal layer -> scoring -> top action card(1).
+    """
+    try:
+        body = request.get_json(silent=True) or {}
+        user_id = session.get("user_id", "anonymous")
+        conversation_id = str(body.get("conversation_id") or session.get("conversation_id") or "")
+        company_id = str(body.get("company_id") or user_id or "default")
+        source = _normalize_intelligence_source(body.get("source") or "ga4")
+
+        current_rows, previous_rows, loaded_from = _load_intelligence_rows_from_request(
+            body=body,
+            conversation_id=conversation_id,
+            source=source,
+        )
+        if not current_rows:
+            return jsonify({
+                "success": False,
+                "error": "분석할 데이터가 없습니다. data.current_rows를 보내거나 먼저 질문 실행 후 다시 시도해 주세요."
+            }), 400
+
+        company_weights = DBManager.get_company_signal_weights(company_id)
+        analysis = marketing_engine.analyze(
+            current_rows=current_rows,
+            previous_rows=previous_rows or None,
+            company_signal_weights=company_weights,
+            source=source,
+        )
+
+        run_payload = {
+            "analysis": analysis,
+            "meta": {
+                "company_id": company_id,
+                "conversation_id": conversation_id,
+                "source": source,
+                "loaded_from": loaded_from,
+                "current_rows": len(current_rows),
+                "previous_rows": len(previous_rows),
+            },
+        }
+        run_id = DBManager.save_intelligence_run(
+            company_id=company_id,
+            user_id=user_id,
+            conversation_id=conversation_id,
+            source=source,
+            payload=run_payload,
+        )
+
+        return jsonify({
+            "success": True,
+            "run_id": run_id,
+            "company_id": company_id,
+            "source": source,
+            "loaded_from": loaded_from,
+            "signal_count": analysis.get("signal_count", 0),
+            "quality_threshold": analysis.get("quality_threshold"),
+            "top_action_card": analysis.get("top_action_card"),
+            "feature_layer_summary": {
+                "metrics": (analysis.get("feature_layer") or {}).get("metrics", []),
+                "dimensions": (analysis.get("feature_layer") or {}).get("dimensions", []),
+                "current_rows_count": (analysis.get("feature_layer") or {}).get("current_rows_count", 0),
+                "previous_rows_count": (analysis.get("feature_layer") or {}).get("previous_rows_count", 0),
+            }
+        })
+    except Exception as e:
+        logging.error(f"Error intelligence analyze: {e}", exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/intelligence/action/select', methods=['POST'])
+def intelligence_action_select():
+    """Create execution plan + experiment for selected top action card."""
+    try:
+        body = request.get_json(silent=True) or {}
+        user_id = session.get("user_id", "anonymous")
+        company_id = str(body.get("company_id") or user_id or "default")
+        run_id = body.get("run_id")
+        action_card = body.get("action_card")
+        primary_metric = body.get("primary_metric")
+        related_dimensions = body.get("related_dimensions") if isinstance(body.get("related_dimensions"), list) else []
+
+        if not action_card and run_id:
+            run = DBManager.get_intelligence_run(int(run_id))
+            if run and isinstance(run.get("payload"), dict):
+                analysis = (run.get("payload") or {}).get("analysis") or {}
+                action_card = analysis.get("top_action_card")
+        if not action_card:
+            return jsonify({"success": False, "error": "action_card 또는 run_id가 필요합니다."}), 400
+
+        plan = marketing_engine.build_execution_plan(
+            action_card=action_card,
+            primary_metric=primary_metric,
+            related_dimensions=related_dimensions,
+        )
+
+        signal = action_card.get("signal") if isinstance(action_card, dict) else {}
+        signal_type = str((signal or {}).get("signal_type") or "")
+        ok = DBManager.create_action_experiment(
+            experiment_id=plan["experiment_id"],
+            company_id=company_id,
+            run_id=int(run_id) if run_id is not None else None,
+            signal_type=signal_type,
+            primary_metric=str(plan.get("primary_metric") or ""),
+            baseline_value=float(plan.get("baseline_value") or 0.0),
+            expected_direction=str(plan.get("expected_direction") or "increase"),
+            related_dimensions=[str(x) for x in (plan.get("related_dimensions") or [])],
+            evaluation_date=str(plan.get("evaluation_date") or ""),
+        )
+        if not ok:
+            return jsonify({"success": False, "error": "실험 생성에 실패했습니다."}), 500
+
+        DBManager.log_insight_feedback(
+            company_id=company_id,
+            signal_type=signal_type,
+            selected=True,
+            rejected=False,
+            experiment_success=None,
+            experiment_id=plan["experiment_id"],
+            run_id=int(run_id) if run_id is not None else None,
+        )
+        weights = DBManager.recalculate_signal_weights(company_id)
+
+        return jsonify({
+            "success": True,
+            "company_id": company_id,
+            "experiment": plan,
+            "updated_weights": weights,
+        })
+    except Exception as e:
+        logging.error(f"Error intelligence action select: {e}", exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/intelligence/action/reject', methods=['POST'])
+def intelligence_action_reject():
+    """Reject current action card and return next-best action card from same run."""
+    try:
+        body = request.get_json(silent=True) or {}
+        user_id = session.get("user_id", "anonymous")
+        company_id = str(body.get("company_id") or user_id or "default")
+        run_id = body.get("run_id")
+        if run_id is None:
+            return jsonify({"success": False, "error": "run_id가 필요합니다."}), 400
+        run = DBManager.get_intelligence_run(int(run_id))
+        if not run:
+            return jsonify({"success": False, "error": "run_id를 찾을 수 없습니다."}), 404
+
+        payload = run.get("payload") if isinstance(run.get("payload"), dict) else {}
+        analysis = payload.get("analysis") if isinstance(payload.get("analysis"), dict) else {}
+        signals = analysis.get("signals") if isinstance(analysis.get("signals"), list) else []
+        if not signals:
+            return jsonify({"success": False, "error": "run에 signal 데이터가 없습니다."}), 400
+
+        rejected_signal_type = str(body.get("signal_type") or "")
+        if not rejected_signal_type:
+            top = analysis.get("top_action_card") if isinstance(analysis.get("top_action_card"), dict) else {}
+            rejected_signal_type = str(((top.get("signal") or {}) if isinstance(top.get("signal"), dict) else {}).get("signal_type") or "")
+        if rejected_signal_type and rejected_signal_type not in SIGNAL_TYPES:
+            return jsonify({"success": False, "error": f"unsupported signal_type: {rejected_signal_type}"}), 400
+
+        DBManager.log_insight_feedback(
+            company_id=company_id,
+            signal_type=rejected_signal_type,
+            selected=False,
+            rejected=True,
+            run_id=int(run_id),
+        )
+        weights = DBManager.recalculate_signal_weights(company_id)
+        rejected_types = set(DBManager.get_run_rejected_signal_types(int(run_id)))
+
+        next_signal = None
+        for s in signals:
+            st = str((s or {}).get("signal_type") or "")
+            if st and st not in rejected_types:
+                next_signal = s
+                break
+
+        if not next_signal:
+            return jsonify({
+                "success": True,
+                "message": "현재 run에서 제시할 추가 Action Card가 없습니다. 2차 관점 분석을 실행해 주세요.",
+                "next_action_card": None,
+                "updated_weights": weights,
+                "rejected_signal_types": sorted(list(rejected_types)),
+            })
+
+        next_card = marketing_engine.build_action_card(next_signal)
+        return jsonify({
+            "success": True,
+            "next_action_card": next_card,
+            "updated_weights": weights,
+            "rejected_signal_types": sorted(list(rejected_types)),
+        })
+    except Exception as e:
+        logging.error(f"Error intelligence action reject: {e}", exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/intelligence/evaluate', methods=['POST'])
+def intelligence_evaluate():
+    """Evaluate experiment result and update feedback-driven company weights."""
+    try:
+        body = request.get_json(silent=True) or {}
+        experiment_id = str(body.get("experiment_id") or "").strip()
+        if not experiment_id:
+            return jsonify({"success": False, "error": "experiment_id가 필요합니다."}), 400
+
+        exp = DBManager.get_action_experiment(experiment_id)
+        if not exp:
+            return jsonify({"success": False, "error": "experiment를 찾을 수 없습니다."}), 404
+
+        current_value = body.get("current_value")
+        if current_value is None:
+            return jsonify({"success": False, "error": "current_value가 필요합니다."}), 400
+
+        side_effect_metric_changes = body.get("side_effect_metric_changes")
+        if not isinstance(side_effect_metric_changes, dict):
+            side_effect_metric_changes = {}
+
+        result = marketing_engine.evaluate_experiment(
+            baseline_value=float(exp.get("baseline_value") or 0.0),
+            current_value=float(current_value),
+            expected_direction=str(exp.get("expected_direction") or "increase"),
+            side_effect_metric_changes={str(k): float(v) for k, v in side_effect_metric_changes.items() if v is not None},
+        )
+
+        ok = DBManager.update_action_experiment_result(
+            experiment_id=experiment_id,
+            result=result,
+            status="evaluated",
+        )
+        if not ok:
+            return jsonify({"success": False, "error": "실험 결과 업데이트에 실패했습니다."}), 500
+
+        company_id = str(exp.get("company_id") or "default")
+        DBManager.log_insight_feedback(
+            company_id=company_id,
+            signal_type=str(exp.get("signal_type") or ""),
+            selected=False,
+            rejected=False,
+            experiment_success=bool(result.get("success")),
+            experiment_id=experiment_id,
+            run_id=exp.get("run_id"),
+        )
+        weights = DBManager.recalculate_signal_weights(company_id)
+
+        return jsonify({
+            "success": True,
+            "experiment_id": experiment_id,
+            "evaluation": result,
+            "updated_weights": weights,
+        })
+    except Exception as e:
+        logging.error(f"Error intelligence evaluate: {e}", exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/intelligence/weights', methods=['GET'])
+def intelligence_weights():
+    try:
+        user_id = session.get("user_id", "anonymous")
+        company_id = str(request.args.get("company_id", default=user_id, type=str) or "default")
+        DBManager.ensure_company_signal_weights(company_id)
+        weights = DBManager.get_signal_weight_snapshot(company_id)
+        return jsonify({
+            "success": True,
+            "company_id": company_id,
+            "weights": weights
+        })
+    except Exception as e:
+        logging.error(f"Error intelligence weights: {e}", exc_info=True)
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 @app.route('/learning_samples', methods=['GET'])
