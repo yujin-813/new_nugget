@@ -190,6 +190,68 @@ def _intent_signature(text: str) -> Dict[str, bool]:
     }
 
 
+QUERY_STATE_SOURCE = "ga4_query"
+TOP_LEVEL_KEYWORDS = [
+    "유입 분석", "매출", "요약", "전환 분석", "전환 현황", "사용자 추이", "채널별 사용자", "상품별 매출"
+]
+EXPANSION_KEYWORDS = [
+    "비교", "대비", "증감", "전주", "전월", "vs",
+    "더 내려", "세분", "드릴다운", "drill down", "drilldown", "상세",
+    "채널별", "소스별", "소스/매체별", "캠페인별", "키워드별", "원인", "함께", "같이", "추가"
+]
+
+
+def _is_comparison_request_text(question: str) -> bool:
+    q = str(question or "").lower()
+    off_patterns = ["비교 말고", "비교말고", "비교 없이", "비교없이", "단일로", "단일로 보여", "단일로 봐", "단일"]
+    if any(p in q for p in off_patterns):
+        return False
+    return any(k in q for k in ["비교", "대비", "증감", "증감률", "전주", "전월", "vs"])
+
+
+def _detect_correction_signal(question: str) -> bool:
+    q = str(question or "").lower().strip()
+    if not q:
+        return False
+    signals = [
+        "왜 자꾸", "아니", "말한 건", "물어봤잖아", "라고 했잖아",
+        "그게 아니", "아니라고", "잘못", "틀렸", "다시", "정정",
+    ]
+    return any(s in q for s in signals)
+
+
+def _metric_swap_from_question(question: str, current_metrics: List[str], metric_append: bool) -> List[str]:
+    """
+    교정/명시 질의에서 metric 충돌 시 자동 교체.
+    - append 의도(함께/같이)가 없으면 primary metric을 질문 의도에 맞게 교체
+    - append 의도면 기존 + 신규 유지
+    """
+    cur = _dedupe_metrics(current_metrics or [])
+    requested = _metric_overrides_from_question(question)
+    if not requested:
+        return cur
+    if metric_append:
+        merged = list(cur)
+        for m in requested:
+            if m not in merged:
+                merged.append(m)
+        return _dedupe_metrics(merged)
+
+    q = str(question or "").lower()
+    mentions_users = any(k in q for k in ["사용자", "유저", "구매자", "후원자", "user"])
+    mentions_revenue = any(k in q for k in ["매출", "수익", "revenue", "금액"])
+
+    # 사용자 질문인데 수익 metric만 잡혀 있으면 사용자 metric으로 스왑
+    if mentions_users and not mentions_revenue:
+        return _dedupe_metrics(["activeUsers"] + [m for m in cur if m not in {"purchaseRevenue", "itemRevenue", "totalRevenue"}])
+    # 매출 질문인데 사용자 metric만 잡혀 있으면 수익 metric으로 스왑
+    if mentions_revenue and not mentions_users:
+        return _dedupe_metrics(["purchaseRevenue"] + [m for m in cur if m not in {"activeUsers"}])
+
+    # 일반 케이스는 질문에서 감지된 metric 우선
+    return _dedupe_metrics(requested + [m for m in cur if m not in requested])
+
+
 def _default_analysis_state() -> Dict[str, Any]:
     return {
         "analysis_type": "summary",  # summary | acquisition | revenue | product
@@ -197,6 +259,7 @@ def _default_analysis_state() -> Dict[str, Any]:
         "metrics": ["activeUsers"],
         "dimensions": [],
         "comparison": False,
+        "execution_mode": "single",  # single | comparison (runtime only)
         "filters": [],
         "cause_analysis": False,
         "asked_queries": []
@@ -226,16 +289,61 @@ def _coerce_analysis_state(raw: Any) -> Dict[str, Any]:
     return out
 
 
+def _sanitize_analysis_state_for_db(state: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    DB 저장 상태는 query 정의만 남기고 실행 모드/임시 플래그는 제거한다.
+    comparison은 intent가 아니라 실행 전략이므로 저장하지 않는다.
+    """
+    st = _coerce_analysis_state(state)
+    st["comparison"] = False
+    st["execution_mode"] = "single"
+    st["cause_analysis"] = False
+    return st
+
+
+def _load_analysis_state_from_db(conversation_id: str) -> Dict[str, Any]:
+    if not conversation_id:
+        return _default_analysis_state()
+    loaded = DBManager.load_last_state(conversation_id, source=QUERY_STATE_SOURCE)
+    if isinstance(loaded, dict):
+        return _coerce_analysis_state(loaded)
+    return _default_analysis_state()
+
+
+def _save_analysis_state_to_db(conversation_id: str, state: Dict[str, Any]) -> None:
+    if not conversation_id:
+        return
+    DBManager.save_success_state(
+        conversation_id=conversation_id,
+        source=QUERY_STATE_SOURCE,
+        state=_sanitize_analysis_state_for_db(state)
+    )
+
+
+def _is_top_level_analysis_request(question: str) -> bool:
+    q = str(question or "").lower().strip()
+    if not q:
+        return False
+    has_expansion = any(k in q for k in EXPANSION_KEYWORDS)
+    has_named_top = any(k in q for k in TOP_LEVEL_KEYWORDS)
+    has_main_intent = bool(_analysis_type_from_question(question))
+    if has_named_top and not has_expansion:
+        return True
+    if has_main_intent and not has_expansion:
+        return True
+    return False
+
+
 def _analysis_type_from_question(question: str) -> str:
     q = (question or "").lower()
+    if any(k in q for k in ["상품", "item", "제품", "카테고리", "후원명", "donation_name"]):
+        return "product"
     if any(k in q for k in ["요약", "브리핑", "한눈", "summary"]):
         return "summary"
     if any(k in q for k in ["유입", "채널", "소스", "매체", "경로", "campaign", "캠페인"]):
         return "acquisition"
     if any(k in q for k in ["매출", "수익", "매출액", "revenue", "후원금액"]):
         return "revenue"
-    if any(k in q for k in ["상품", "item", "제품", "카테고리", "후원명", "donation_name"]):
-        return "product"
     return ""
 
 
@@ -553,7 +661,8 @@ def _build_query_state(state: Dict[str, Any], question: str) -> Dict[str, Any]:
 
     sort = _parse_sort_from_question(question, requested_metrics)
     limit = _parse_limit_from_question(question, default=10)
-    comparison_enabled = bool(st.get("comparison")) or any(k in str(question or "").lower() for k in ["비교", "대비", "증감", "전주", "전월", "vs"])
+    comparison_enabled = _is_comparison_request_text(question)
+    execution_mode = "comparison" if comparison_enabled else "single"
 
     return {
         "analysisType": analysis_type,
@@ -562,6 +671,7 @@ def _build_query_state(state: Dict[str, Any], question: str) -> Dict[str, Any]:
         "metrics": requested_metrics,
         "sort": sort,
         "limit": limit,
+        "execution_mode": execution_mode,
         "comparison": {
             "enabled": comparison_enabled,
             "previousPeriod": {"start": prev_start, "end": prev_end}
@@ -630,7 +740,10 @@ def _merge_analysis_state(current_state: Dict[str, Any], delta: Dict[str, Any]) 
     if requested_type and not cause:
         # dimension swap 요청은 analysis_type 전환 없이 현재 컨텍스트 유지
         dimension_only_swap = bool(requested_dim) and not bool(metric_overrides)
-        if dimension_only_swap and not default_like:
+        if requested_type != st.get("analysis_type"):
+            # explicit intent 전환은 비교 요청과 무관하게 우선한다.
+            st["analysis_type"] = requested_type
+        elif dimension_only_swap and not default_like:
             pass
         elif compare and not default_like:
             pass
@@ -654,6 +767,8 @@ def _merge_analysis_state(current_state: Dict[str, Any], delta: Dict[str, Any]) 
         else:
             st["dimensions"] = [requested_dim]
     elif drilldown:
+        if st["analysis_type"] == "summary":
+            st["analysis_type"] = "acquisition"
         if st["analysis_type"] == "acquisition":
             cur_dim = st["dimensions"][0] if st["dimensions"] else ""
             st["dimensions"] = [_next_acquisition_dimension(cur_dim)]
@@ -711,6 +826,39 @@ def _merge_analysis_state(current_state: Dict[str, Any], delta: Dict[str, Any]) 
     return st
 
 
+def _build_state_from_scratch(user_input: str, previous_state: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    상태 merge 대신 rebuild.
+    - top-level intent: 기본 상태에서 재구성
+    - 확장 질의: 이전 상태를 기준으로 명시 필드만 반영
+    """
+    prev = _coerce_analysis_state(previous_state)
+    delta = _parse_state_delta(user_input)
+    is_top_level = _is_top_level_analysis_request(user_input)
+    is_correction = _detect_correction_signal(user_input)
+    if is_top_level or is_correction:
+        st = _default_analysis_state()
+        if delta.get("analysis_type"):
+            st["analysis_type"] = str(delta.get("analysis_type"))
+    else:
+        st = _coerce_analysis_state(prev)
+    st = _merge_analysis_state(st, delta)
+    # metric 충돌 자동 교체/병합
+    st["metrics"] = _metric_swap_from_question(
+        question=user_input,
+        current_metrics=st.get("metrics") or [],
+        metric_append=bool(delta.get("metric_append")),
+    )
+    if not st["metrics"]:
+        st["metrics"] = _metric_defaults_for_analysis(st.get("analysis_type", "summary"))
+    # comparison은 실행 전략으로 매 요청 재결정 (기본 off)
+    st["comparison"] = bool(_is_comparison_request_text(user_input))
+    if not st["comparison"]:
+        st["period"]["previous"] = None
+    st["execution_mode"] = "comparison" if st["comparison"] else "single"
+    return st
+
+
 def _period_prefix_from_state(state: Dict[str, Any]) -> str:
     symbol = str((state.get("period") or {}).get("symbol") or "")
     mapping = {
@@ -754,7 +902,7 @@ def _build_query_from_analysis_state(original_question: str, state: Dict[str, An
     primary_metric = _expand_metrics_for_query(metrics)[0] if metrics else "activeUsers"
     dim = (st.get("dimensions") or [""])[0]
     period_prefix = _period_prefix_from_state(st)
-    compare = bool(st.get("comparison"))
+    compare = _is_comparison_request_text(q)
     cause = bool(st.get("cause_analysis"))
 
     metric_ui = _metrics_ui_label(metrics)
@@ -817,7 +965,7 @@ def _build_followups_from_state(state: Dict[str, Any], current_question: str) ->
     asked = set(st.get("asked_queries") or [])
     atype = st.get("analysis_type")
     dim = (st.get("dimensions") or [""])[0]
-    compare = bool(st.get("comparison"))
+    compare = str(st.get("execution_mode") or "single") == "comparison" or bool(st.get("comparison"))
     cause = bool(st.get("cause_analysis"))
     out: List[str] = []
 
@@ -1257,7 +1405,7 @@ def _build_no_data_explained_response(
     dim_txt = _dimension_label(dim) if dim else "전체(총합)"
     metric_txt = _metrics_ui_label(metrics)
     source = "GA4" if property_id else ("FILE" if file_path else "미지정")
-    compare_txt = "비교(현재/이전 기간)" if bool(st.get("comparison")) else "단일 기간"
+    compare_txt = "비교(현재/이전 기간)" if str(st.get("execution_mode") or "single") == "comparison" else "단일 기간"
     period_line = f"{period}"
     if previous:
         period_line = f"{period} vs {previous}"
@@ -1301,6 +1449,52 @@ def _is_ga_no_match_response(resp: Any) -> bool:
     if route not in {"ga4", "ga4_followup"}:
         return False
     return _is_no_data_or_no_match_response(resp)
+
+
+def _is_intent_result_mismatch(question: str, resp: Any) -> bool:
+    """
+    질문 의도와 응답 결과가 명백히 어긋난 경우를 감지한다.
+    감지 시 내부 1회 재시도 트리거로 사용.
+    """
+    if not _is_likely_ga_data_question(question):
+        return False
+    body = _extract_response_body(resp)
+    msg = str(body.get("message", "")).lower()
+    raw = body.get("raw_data")
+    cols = set()
+    if isinstance(raw, list) and raw and isinstance(raw[0], dict):
+        cols = {str(k).lower() for k in raw[0].keys()}
+
+    sig = _intent_signature(question)
+
+    def _has_any(tokens: List[str]) -> bool:
+        return any(t in msg for t in tokens) or any(t in cols for t in tokens)
+
+    # 유입/경로 질문인데 채널/소스/매체 단서가 없고 매출/수익만 응답한 경우
+    if sig.get("channel"):
+        has_channel_shape = _has_any([
+            "defaultchannelgroup", "sessiondefaultchannelgroup",
+            "source", "sourcemedium", "medium", "campaign", "channel", "경로", "유입"
+        ])
+        has_revenue_only = _has_any(["매출", "수익", "purchaserevenue", "itemrevenue", "totalrevenue"])
+        if not has_channel_shape and has_revenue_only:
+            return True
+
+    # 사용자 질문인데 수익 중심만 반환한 경우
+    if sig.get("user") and not sig.get("revenue"):
+        has_user_shape = _has_any(["activeusers", "totalusers", "users", "사용자", "유저", "구매자", "후원자"])
+        has_revenue_shape = _has_any(["매출", "수익", "purchaserevenue", "itemrevenue", "totalrevenue"])
+        if has_revenue_shape and not has_user_shape:
+            return True
+
+    # 매출 질문인데 사용자 중심만 반환한 경우
+    if sig.get("revenue") and not sig.get("user"):
+        has_revenue_shape = _has_any(["매출", "수익", "purchaserevenue", "itemrevenue", "totalrevenue"])
+        has_user_shape = _has_any(["activeusers", "totalusers", "users", "사용자", "유저"])
+        if has_user_shape and not has_revenue_shape:
+            return True
+
+    return False
 
 
 def _rewrite_ga_question_for_retry(question: str) -> str:
@@ -1386,7 +1580,7 @@ def _is_likely_ga_data_question(question: str) -> bool:
     q = (question or "").lower()
     return any(k in q for k in [
         "매출", "수익", "구매", "사용자", "세션", "이벤트", "클릭", "전환",
-        "채널", "소스", "매체", "지난주", "지난달", "이번주", "이번달", "ga4"
+        "채널", "소스", "매체", "유입", "경로", "지난주", "지난달", "이번주", "이번달", "ga4"
     ])
 
 
@@ -2774,7 +2968,7 @@ def _resolve_period_ranges_from_state_or_question(state: Dict[str, Any], questio
         else:
             s, e = _resolve_summary_date_range(question)
             period_current = f"{s} ~ {e}"
-    if not period_previous and bool(st.get("comparison")):
+    if not period_previous and _is_comparison_request_text(question):
         period_previous = _previous_period_range(period_current)
     cur_start, cur_end = [x.strip() for x in period_current.split("~", 1)]
     if period_previous and "~" in period_previous:
@@ -3008,8 +3202,8 @@ def _direct_ga_state_compare_fallback(question: str, property_id: str, state: Di
     if not property_id or 'credentials' not in session:
         return None
     st = _coerce_analysis_state(state)
-    has_compare = any(k in q for k in ["비교", "대비", "증감", "차이", "전주", "전월", "vs"])
-    if not (has_compare or bool(st.get("comparison"))):
+    has_compare = _is_comparison_request_text(q)
+    if not has_compare:
         return None
 
     try:
@@ -3860,15 +4054,29 @@ def ask_question():
     try:
         data = request.get_json()
         original_question = (data.get('question') or "").strip()
-        analysis_state = _coerce_analysis_state(session.get("current_analysis_state"))
+        user_id = session.get("user_id", "anonymous")
+        conversation_id = session.get("conversation_id")
+        if not conversation_id:
+            session['conversation_id'] = str(uuid.uuid4())
+            conversation_id = session['conversation_id']
+
+        # 상태 단일 소스: DB에서 로드하고 session은 캐시로만 사용
+        analysis_state = _load_analysis_state_from_db(conversation_id)
+        session["current_analysis_state"] = analysis_state
         if original_question and not _is_general_chat_text(original_question):
-            delta = _parse_state_delta(original_question)
-            analysis_state = _merge_analysis_state(analysis_state, delta)
-            session["current_analysis_state"] = analysis_state
+            likely_ga_question = (
+                _is_likely_ga_data_question(original_question)
+                or _is_expansion_request(original_question)
+                or _detect_correction_signal(original_question)
+            )
+            if likely_ga_question:
+                analysis_state = _build_state_from_scratch(original_question, analysis_state)
+                session["current_analysis_state"] = analysis_state
+                _save_analysis_state_to_db(conversation_id, analysis_state)
 
         prev_user_q = str(session.get("last_user_question") or "")
         if not prev_user_q:
-            current_state = session.get("current_analysis_state")
+            current_state = analysis_state
             ql_tmp = (original_question or "").lower()
             if _is_expansion_request(original_question) or any(k in ql_tmp for k in ["원인", "이유", "왜", "더 내려", "세분", "드릴다운", "drill down", "drilldown"]):
                 prev_user_q = _build_anchor_query_from_state(current_state)
@@ -3927,11 +4135,11 @@ def ask_question():
                     is_followup_selected = True
                     selected_followup_text = question
 
-        # 추천 클릭으로 질문이 치환된 경우 상태도 해당 질문으로 재병합
+        # 추천 클릭으로 질문이 치환된 경우 상태를 rebuild하고 DB에 저장
         if is_followup_selected and selected_followup_text:
-            delta2 = _parse_state_delta(selected_followup_text)
-            analysis_state = _merge_analysis_state(analysis_state, delta2)
+            analysis_state = _build_state_from_scratch(selected_followup_text, analysis_state)
             session["current_analysis_state"] = analysis_state
+            _save_analysis_state_to_db(conversation_id, analysis_state)
             if _is_likely_ga_data_question(selected_followup_text):
                 question = _build_query_from_analysis_state(selected_followup_text, analysis_state)
 
@@ -3939,14 +4147,6 @@ def ask_question():
         # 🔥 파일 경로 세션 연동 (전처리 우선)
         file_path = session.get("preprocessed_data_path") or session.get("uploaded_file_path")
         
-        user_id = session.get("user_id", "anonymous")
-        conversation_id = session.get("conversation_id")
-
-        if not conversation_id:
-            import uuid
-            session['conversation_id'] = str(uuid.uuid4())
-            conversation_id = session['conversation_id']
-
         # 요약 질의는 일반 파서 실패를 줄이기 위해 시작점에서 전용 경로 우선 처리
         response = None
         if _is_summary_request(original_question) and _is_likely_ga_data_question(original_question) and property_id:
@@ -4023,6 +4223,30 @@ def ask_question():
                 semantic=semantic,
                 beginner_mode=bool(session.get("beginner_mode", False))
             )
+
+        # 결과-의도 불일치 시: 현재 문장 기준으로 상태 재구성 후 1회 자동 재시도
+        if (
+            property_id
+            and _is_likely_ga_data_question(original_question)
+            and _is_intent_result_mismatch(original_question, response)
+        ):
+            logging.info("[Ask] Intent/Result mismatch detected. Rebuild from current sentence and retry once.")
+            rebuilt_state = _build_state_from_scratch(original_question, _default_analysis_state())
+            analysis_state = rebuilt_state
+            session["current_analysis_state"] = analysis_state
+            _save_analysis_state_to_db(conversation_id, analysis_state)
+            retry_question = _build_query_from_analysis_state(original_question, analysis_state)
+            response_retry = handle_question(
+                retry_question,
+                property_id=property_id,
+                file_path=file_path,
+                user_id=user_id,
+                conversation_id=f"{conversation_id}:mismatch:{uuid.uuid4().hex[:8]}",
+                semantic=semantic,
+                beginner_mode=bool(session.get("beginner_mode", False))
+            )
+            if not _is_intent_result_mismatch(original_question, response_retry):
+                response = response_retry
 
         # 추천 질문 클릭 시 "매칭 실패"면 컨텍스트를 붙여 1회 자동 재시도
         if is_followup_selected and _is_no_data_or_no_match_response(response):
@@ -4206,7 +4430,7 @@ def ask_question():
                 )
                 if str(r or "").lower() in {"ga4", "ga4_followup"}:
                     b["followup_suggestions"] = _build_followups_from_state(
-                        state=_coerce_analysis_state(session.get("current_analysis_state")),
+                        state=analysis_state,
                         current_question=original_question
                     )
                 if isinstance(response.get("response"), dict):

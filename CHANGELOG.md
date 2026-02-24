@@ -1,5 +1,40 @@
 # Changelog
 
+## v0.9.12 - 2026-02-23
+- Fixed drill-down behavior after summary/channel context:
+- `더 내려서` now promotes summary context to acquisition and advances hierarchy as expected.
+- Fixed explicit intent switching under comparison:
+- Queries like `지난달 매출 비교` now switch analysis type to revenue even when compare tokens exist.
+- Added comparison opt-out phrase handling:
+- Expressions like `비교 말고`, `단일로` now force non-comparison execution mode.
+- Adjusted intent priority for mixed product+revenue phrases:
+- `상품별 매출 ...` now prefers product analysis type.
+
+## v0.9.11 - 2026-02-23
+- Added correction-trigger handling for conversational repair:
+- Inputs like `아니`, `왜 자꾸`, `말한 건`, `물어봤잖아` now force state rebuild from current sentence with minimal carry-over.
+- Added metric conflict swap logic:
+- If user intent switches (e.g., user-count question while revenue metric is active), metrics are auto-swapped.
+- Multi-metric append remains supported for `함께/같이/추가` expressions.
+- Comparison default-off hardening:
+- Comparison is recomputed per question; when absent, previous comparison period is cleared.
+- Added intent/result mismatch self-retry (one-shot):
+- When response shape clearly mismatches user intent, system rebuilds state from current sentence and reruns once.
+
+## v0.9.10 - 2026-02-23
+- State persistence hardened to DB-single-source for query state:
+- Added dedicated source key `ga4_query`; analysis state now loads from DB first and session is treated as cache-only copy.
+- Replaced direct session merge flow with rebuild flow:
+- Added `_build_state_from_scratch(user_input, previous_state)` and top-level detection `_is_top_level_analysis_request(...)`.
+- Top-level analysis requests now reset base state before applying parsed constraints.
+- Comparison execution decoupled from persisted state:
+- Added runtime `execution_mode` and question-based comparison detection `_is_comparison_request_text(...)`.
+- Persisted state now strips transient flags (`comparison`, `cause_analysis`, runtime mode) via `_sanitize_analysis_state_for_db(...)`.
+- Query building/period resolution now derive comparison from current question, reducing stale-flag leakage between turns.
+- `ask_question` flow updated:
+- state pipeline is now `DB load -> rebuild -> DB save -> session cache`.
+- follow-up selection also rebuilds/saves state through the same DB pipeline.
+
 ## v0.9.9 - 2026-02-24
 - Added structured QueryState execution model for GA4 flows:
 - `analysisType`, `period`, `dimension`, `metrics`, `sort`, `limit`, `comparison.previousPeriod`.
