@@ -1,5 +1,41 @@
 # Changelog
 
+## v0.9.14 - 2026-02-24
+- Intent stress hardening for 30-case suite:
+- `BREAKDOWN` detection expanded (`디바이스별`, `상품별`, `카테고리별`, `상위`, `top`) to prevent false `SUMMARY` classification.
+- Dimension mapping expanded:
+- added `deviceCategory`, `pagePath` path in canonical resolver + modifier parser.
+- Source scoring strengthened:
+- added explicit `GA` token handling (`\\bga4?\\b`), GA+FILE mixed compare boost, and mixed phrase coverage (`GA 데이터랑 파일 ...`).
+- Added `summary_scope` extraction in intent model:
+- auto maps to `traffic | engagement | conversion | revenue | file | conversation | null`.
+- Summary scope default metric mapping added:
+- `traffic -> activeUsers`, `engagement -> engagementRate`, `conversion -> conversions`, `revenue -> totalRevenue/purchaseRevenue`.
+- WHY/COMPARE metric safety:
+- when metric is missing, reuse state metric first, then fallback to `activeUsers`.
+- Diagnose lexicon expanded for error-like phrasing:
+- supports `이상`, `값이 0`, `0이야`, `0으로만`.
+- Local 30-case stress check result: `PASS 30/30`.
+
+## v0.9.13 - 2026-02-24
+- Intent-slot model wired into `/ask_question` execution path:
+- every turn now builds a structured intent JSON (`action`, `source`, `time`, `entities`, `output`, `confidence`), and the model is returned in API responses as `intent_model`.
+- Action taxonomy enforcement updated:
+- single-action selection uses fixed priority  
+  `REPORT > DIAGNOSE > WHY > COMPARE > TREND > BREAKDOWN > SEGMENT > SUMMARY`.
+- Source decision upgraded to 3-step scoring:
+- keyword score + connection state + previous source context; ties resolve to `ASK`.
+- Added one-turn clarification flow (max 2 options):
+- intent clarification and source clarification are asked once and expire next turn if user does not select.
+- Metadata validation safety rule enforced:
+- when requested GA4 dimension is unavailable, `WHY`/`COMPARE` execution is blocked and action is downgraded to `DIAGNOSE` with alternatives.
+- Added one-shot source forcing handoff to router:
+- `/ask_question` sets `forced_source_once`; `qa_module.handle_question` now consumes it and skips repeated source-choice loops.
+- Feedback loop enrichment:
+- automatic bad-feedback logging now includes previous `intent_model` payload to improve intent-correction datasets.
+- Conversation reset hygiene expanded:
+- clears new intent/session keys (`pending_intent_*`, `forced_source_once`, `last/current_intent_model`) on new conversation.
+
 ## v0.9.12 - 2026-02-23
 - Fixed drill-down behavior after summary/channel context:
 - `더 내려서` now promotes summary context to acquisition and advances hierarchy as expected.

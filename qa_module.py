@@ -1323,7 +1323,10 @@ def handle_question(
     # 소스 선택 확인 처리 (GA4 / 파일)
     pending_source = session.get("pending_source_choice")
     forced_route = None
-    if pending_source:
+    forced_source_once = str(session.pop("forced_source_once", "") or "").strip().lower()
+    if forced_source_once in {"ga4", "file", "mixed"}:
+        forced_route = forced_source_once
+    if pending_source and not forced_route:
         normalized = _normalize_choice_text(question)
         # 선택 루프 방지를 위해 숫자/키워드 해석을 넓게 허용
         choose_ga = normalized in {"1", "1번", "ga", "ga4", "analytics", "ga로", "ga4로"} or bool(re.match(r"^1번?$", normalized))

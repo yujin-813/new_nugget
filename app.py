@@ -200,6 +200,35 @@ EXPANSION_KEYWORDS = [
     "채널별", "소스별", "소스/매체별", "캠페인별", "키워드별", "원인", "함께", "같이", "추가"
 ]
 
+ACTION_PRIORITY = [
+    "REPORT",
+    "DIAGNOSE",
+    "WHY",
+    "COMPARE",
+    "TREND",
+    "BREAKDOWN",
+    "SEGMENT",
+    "SUMMARY",
+]
+
+ACTION_LABELS = {
+    "REPORT": "리포트",
+    "DIAGNOSE": "진단",
+    "WHY": "원인분석",
+    "COMPARE": "비교",
+    "TREND": "추이",
+    "BREAKDOWN": "분해",
+    "SEGMENT": "세그먼트",
+    "SUMMARY": "요약",
+}
+
+SOURCE_LABELS = {
+    "GA4": "GA4",
+    "FILE": "파일",
+    "MIXED": "혼합",
+    "ASK": "확인",
+}
+
 
 def _is_comparison_request_text(question: str) -> bool:
     q = str(question or "").lower()
@@ -207,6 +236,325 @@ def _is_comparison_request_text(question: str) -> bool:
     if any(p in q for p in off_patterns):
         return False
     return any(k in q for k in ["비교", "대비", "증감", "증감률", "전주", "전월", "vs"])
+
+
+def _detect_action_candidates(question: str) -> Dict[str, bool]:
+    q = str(question or "").lower()
+    return {
+        "REPORT": any(k in q for k in ["리포트", "보고서", "공유", "내보내", "노션", "잔디", "slack", "ppt"]),
+        "DIAGNOSE": any(k in q for k in ["안 나와", "안나와", "없어", "비어", "오류", "에러", "왜 안", "왜없", "매칭 못", "찾지 못", "이상", "값이 0", "0이야", "0으로만"]),
+        "WHY": any(k in q for k in ["원인", "왜", "이유", "해석"]),
+        "COMPARE": _is_comparison_request_text(q),
+        "TREND": any(k in q for k in ["추이", "트렌드", "흐름", "일별", "월별", "변화"]),
+        "BREAKDOWN": any(k in q for k in ["채널별", "국가별", "페이지별", "디바이스별", "상품별", "카테고리별", "소스별", "매체별", "나눠", "분해", "브레이크다운", "별로", "상위", "top"]),
+        "SEGMENT": any(k in q for k in ["신규", "재방문", "세그먼트", "집단", "모바일만", "pc만", "디바이스만"]),
+        "SUMMARY": any(k in q for k in ["요약", "한눈", "정리", "브리핑", "overview"]),
+    }
+
+
+def _select_single_action(question: str) -> str:
+    candidates = _detect_action_candidates(question)
+    for action in ACTION_PRIORITY:
+        if candidates.get(action):
+            return action
+    return "SUMMARY"
+
+
+def _extract_custom_date_range(question: str) -> Tuple[str | None, str | None]:
+    q = str(question or "")
+    m = re.search(r"(20\d{2}-\d{2}-\d{2})\s*(?:~|부터|-)\s*(20\d{2}-\d{2}-\d{2})", q)
+    if m:
+        return m.group(1), m.group(2)
+    return None, None
+
+
+def _parse_time_slot(question: str) -> Dict[str, Any]:
+    q = str(question or "").lower()
+    s, e = _extract_custom_date_range(question)
+    if s and e:
+        return {"mode": "CUSTOM", "start": s, "end": e}
+    if any(k in q for k in ["최근 30일", "최근30일", "last 30 days"]):
+        end = date.today()
+        start = end - timedelta(days=29)
+        return {"mode": "LAST_30_DAYS", "start": start.isoformat(), "end": end.isoformat()}
+    sym = _period_symbol_from_question(question)
+    if sym:
+        rs, re_ = _period_symbol_to_range(sym)
+        mapping = {
+            "last_week": "LAST_WEEK",
+            "this_week": "THIS_WEEK",
+            "last_month": "LAST_MONTH",
+            "this_month": "THIS_MONTH",
+            "last_7d": "LAST_7_DAYS",
+            "today": "TODAY",
+            "yesterday": "YESTERDAY",
+        }
+        return {"mode": mapping.get(sym, "CUSTOM"), "start": rs, "end": re_}
+    return {"mode": "KEEP_STATE", "start": None, "end": None}
+
+
+def _dimension_candidates_by_canonical(canonical_dim: str) -> List[str]:
+    c = str(canonical_dim or "")
+    if c in {"defaultChannelGroup", "channel"}:
+        return ["sessionDefaultChannelGroup", "defaultChannelGroup", "firstUserDefaultChannelGroup"]
+    if c in {"source", "sessionSource"}:
+        return ["source", "sessionSource"]
+    if c in {"sourceMedium", "sessionSourceMedium"}:
+        return ["sourceMedium", "sessionSourceMedium"]
+    if c in {"campaign", "campaignName"}:
+        return ["campaignName", "sessionCampaignName", "firstUserCampaignName", "customEvent:campaign_name"]
+    if c in {"keyword"}:
+        return ["keyword", "searchTerm", "sessionManualTerm", "firstUserManualTerm", "manualTerm", "customEvent:keyword"]
+    if c in {"page", "landingPage"}:
+        return ["landingPage", "landingPagePlusQueryString", "pagePath", "pageTitle", "fullPageUrl"]
+    if c in {"country"}:
+        return ["country"]
+    if c in {"device", "deviceCategory"}:
+        return ["deviceCategory"]
+    if c in {"page", "pagePath", "landingPage"}:
+        return ["pagePath", "landingPage", "landingPagePlusQueryString", "pageTitle", "fullPageUrl"]
+    if c in {"itemName"}:
+        return ["itemName", "customEvent:donation_name"]
+    return [c] if c else []
+
+
+def _resolve_existing_ga4_dimension(canonical_dim: str) -> Tuple[str, List[str]]:
+    candidates = _dimension_candidates_by_canonical(canonical_dim)
+    exists = [d for d in candidates if d in GA4_DIMENSIONS]
+    chosen = exists[0] if exists else ""
+    alternatives = exists[1:3]
+    if not alternatives:
+        for d in ["sourceMedium", "defaultChannelGroup", "source"]:
+            if d in GA4_DIMENSIONS and d != chosen and d not in alternatives:
+                alternatives.append(d)
+            if len(alternatives) >= 2:
+                break
+    return chosen, alternatives[:2]
+
+
+def _score_source(question: str, has_ga: bool, has_file: bool, prev_source: str = "") -> Tuple[str, Dict[str, int]]:
+    q = str(question or "").lower()
+    scores = {"GA4": 0, "FILE": 0, "MIXED": 0}
+
+    ga_terms = ["ga4", "analytics", "사용자", "세션", "채널", "전환", "페이지", "캠페인", "utm", "유입", "경로", "참여율"]
+    file_terms = ["파일", "csv", "엑셀", "xlsx", "업로드", "컬럼", "행", "피벗", "sheet"]
+    mixed_terms = ["둘 다", "같이", "조인", "매칭", "합쳐", "ga랑 파일", "ga와 파일", "파일이랑 ga", "ga4와 파일", "ga4랑 파일"]
+
+    scores["GA4"] += sum(1 for t in ga_terms if t in q)
+    scores["FILE"] += sum(1 for t in file_terms if t in q)
+    scores["MIXED"] += 3 * sum(1 for t in mixed_terms if t in q)
+    has_ga_token = bool(re.search(r"\bga4?\b", q))
+    has_file_token = any(t in q for t in ["파일", "csv", "엑셀", "xlsx"])
+    if has_ga_token:
+        scores["GA4"] += 2
+    if has_file_token:
+        scores["FILE"] += 1
+    if has_ga_token and has_file_token and any(t in q for t in ["비교", "같이", "조인", "매칭", "합쳐"]):
+        scores["MIXED"] += 4
+
+    if has_ga:
+        scores["GA4"] += 1
+    if has_file:
+        scores["FILE"] += 1
+    if has_ga and has_file:
+        scores["MIXED"] += 1
+
+    ps = str(prev_source or "").lower()
+    if ps in {"ga4", "ga4_followup"}:
+        scores["GA4"] += 1
+    elif ps == "file":
+        scores["FILE"] += 1
+    elif ps == "mixed":
+        scores["MIXED"] += 1
+
+    ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+    if not ranked:
+        return "ASK", scores
+    top_score = ranked[0][1]
+    top_items = [k for k, v in ranked if v == top_score]
+    if top_score <= 0 or len(top_items) > 1:
+        return "ASK", scores
+    source = top_items[0]
+    if source == "MIXED" and not (has_ga and has_file):
+        return "ASK", scores
+    if source == "GA4" and not has_ga and has_file:
+        return "ASK", scores
+    if source == "FILE" and not has_file and has_ga:
+        return "ASK", scores
+    return source, scores
+
+
+def _build_intent_model(
+    question: str,
+    state: Dict[str, Any],
+    has_ga: bool,
+    has_file: bool,
+    prev_source: str = "",
+) -> Dict[str, Any]:
+    st = _coerce_analysis_state(state)
+    q = str(question or "")
+    action = _select_single_action(q)
+    source, source_scores = _score_source(q, has_ga=has_ga, has_file=has_file, prev_source=prev_source)
+    time_slot = _parse_time_slot(q)
+
+    metric_candidates = _metric_overrides_from_question(q)
+    dim_candidate = _analysis_dimension_modifier(q)
+    filters: List[Dict[str, Any]] = []
+    segments: List[str] = []
+    if any(k in q for k in ["신규", "first"]):
+        segments.append("new_users")
+    if any(k in q for k in ["재방문", "returning"]):
+        segments.append("returning_users")
+    if any(k in q.lower() for k in ["모바일만", "mobile only"]):
+        segments.append("mobile_only")
+
+    def _summary_scope_from_text(text: str) -> str | None:
+        t = str(text or "").lower()
+        if any(k in t for k in ["파일", "csv", "엑셀", "xlsx", "컬럼", "행"]):
+            return "file"
+        if any(k in t for k in ["대화", "맥락", "이전 질문", "conversation"]):
+            return "conversation"
+        if any(k in t for k in ["매출", "수익", "revenue", "금액"]):
+            return "revenue"
+        if any(k in t for k in ["전환", "가입", "구매율", "conversion"]):
+            return "conversion"
+        if any(k in t for k in ["참여", "참여율", "engagement"]):
+            return "engagement"
+        if any(k in t for k in ["트래픽", "유입", "사용자", "세션", "채널", "페이지", "traffic"]):
+            return "traffic"
+        return None
+
+    summary_scope = _summary_scope_from_text(q)
+
+    if action == "SUMMARY" and not metric_candidates and summary_scope:
+        scope_default_metric = {
+            "traffic": "activeUsers",
+            "engagement": "engagementRate",
+            "conversion": "conversions",
+            "revenue": "totalRevenue" if "totalRevenue" in GA4_METRICS else "purchaseRevenue",
+        }
+        mapped = scope_default_metric.get(summary_scope)
+        if mapped:
+            metric_candidates = [mapped]
+
+    # SUMMARY scope 기본 규칙
+    needs_clarification = False
+    clarification_question = None
+    clarification_options: List[str] = []
+    if action == "SUMMARY" and not metric_candidates:
+        current_goal_metrics = [m for m in (st.get("metrics") or []) if m not in {"activeUsers"}]
+        if current_goal_metrics:
+            metric_candidates = current_goal_metrics[:2]
+        elif not summary_scope:
+            needs_clarification = True
+            clarification_question = "트래픽 기준으로 볼까요, 전환(가입/구매) 기준으로 볼까요?"
+            clarification_options = ["트래픽", "전환"]
+        else:
+            needs_clarification = False
+
+    if action in {"WHY", "COMPARE"} and not metric_candidates:
+        state_metrics = _dedupe_metrics(st.get("metrics") or [])
+        if state_metrics:
+            metric_candidates = state_metrics[:2]
+        else:
+            metric_candidates = ["activeUsers"]
+
+    # canonical -> metadata 존재 검증
+    if source == "GA4" and dim_candidate:
+        chosen_dim, alternatives = _resolve_existing_ga4_dimension(dim_candidate)
+        if chosen_dim:
+            dim_candidate = chosen_dim
+        else:
+            # WHY/COMPARE는 검증 실패 시 실행 금지 -> DIAGNOSE 전환
+            if action in {"WHY", "COMPARE"}:
+                action = "DIAGNOSE"
+            needs_clarification = True
+            alternative_labels = [GA4_DIMENSIONS.get(x, {}).get("ui_name") or x for x in alternatives[:2]]
+            while len(alternative_labels) < 2:
+                alternative_labels.append("전체")
+            clarification_question = f"요청한 차원을 찾지 못했어요. 대신 `{alternative_labels[0]}` 또는 `{alternative_labels[1]}`로 볼까요?"
+            clarification_options = alternative_labels[:2]
+            dim_candidate = ""
+
+    output_format = "TEXT"
+    if action in {"BREAKDOWN", "COMPARE", "SEGMENT"}:
+        output_format = "TABLE"
+    if action == "TREND":
+        output_format = "CHART"
+    if action == "REPORT":
+        output_format = "REPORT_BLOCK"
+
+    confidence = 0.6
+    if source != "ASK":
+        confidence += 0.15
+    if action != "SUMMARY":
+        confidence += 0.15
+    if metric_candidates or dim_candidate:
+        confidence += 0.1
+    confidence = max(0.0, min(1.0, confidence))
+
+    return {
+        "action": action,
+        "source": source,
+        "time": time_slot,
+        "entities": {
+            "metrics": _dedupe_metrics(metric_candidates),
+            "dimensions": [dim_candidate] if dim_candidate else [],
+            "filters": filters,
+            "segments": segments,
+        },
+        "summary_scope": summary_scope,
+        "output": {
+            "format": output_format,
+            "top_n": _parse_limit_from_question(q, default=10),
+        },
+        "source_scores": source_scores,
+        "confidence": confidence,
+        "needs_clarification": bool(needs_clarification),
+        "clarification_question": clarification_question,
+        "clarification_options": (clarification_options or [])[:2],
+        "correction_mode": _detect_correction_signal(q),
+    }
+
+
+def _normalize_choice_text_local(text: str) -> str:
+    s = str(text or "").strip().lower()
+    s = s.replace("`", "").replace("'", "").replace('"', "")
+    s = re.sub(r"\s+", "", s)
+    s = re.sub(r"[^0-9a-z가-힣/_-]", "", s)
+    return s
+
+
+def _resolve_choice_index(answer: str, options: List[str]) -> int:
+    opts = [str(x or "").strip() for x in (options or []) if str(x or "").strip()]
+    if not opts:
+        return -1
+    norm = _normalize_choice_text_local(answer)
+    if not norm:
+        return -1
+
+    if norm in {"1", "1번"}:
+        return 0 if len(opts) >= 1 else -1
+    if norm in {"2", "2번"}:
+        return 1 if len(opts) >= 2 else -1
+
+    aliases = {
+        "ga4": {"ga", "ga4", "analytics", "구글애널리틱스"},
+        "파일": {"file", "csv", "xlsx", "엑셀", "파일"},
+        "트래픽": {"트래픽", "traffic"},
+        "전환": {"전환", "conversion"},
+    }
+
+    for i, opt in enumerate(opts[:2]):
+        on = _normalize_choice_text_local(opt)
+        if norm == on:
+            return i
+        if on and (on in norm or norm in on):
+            return i
+        for key, toks in aliases.items():
+            if on == _normalize_choice_text_local(key) and norm in {_normalize_choice_text_local(x) for x in toks}:
+                return i
+    return -1
 
 
 def _detect_correction_signal(question: str) -> bool:
@@ -409,6 +757,10 @@ def _previous_period_range(current_range: str) -> str:
 
 def _analysis_dimension_modifier(question: str) -> str:
     q = (question or "").lower()
+    if any(k in q for k in ["디바이스", "기기", "device"]):
+        return "deviceCategory"
+    if any(k in q for k in ["페이지", "page", "랜딩"]):
+        return "pagePath"
     if any(k in q for k in ["키워드", "keyword", "검색어"]):
         # metadata에 keyword 계열 차원이 없을 수 있어 symbolic 키를 먼저 반환
         return "keyword"
@@ -856,6 +1208,50 @@ def _build_state_from_scratch(user_input: str, previous_state: Dict[str, Any]) -
     if not st["comparison"]:
         st["period"]["previous"] = None
     st["execution_mode"] = "comparison" if st["comparison"] else "single"
+    return st
+
+
+def _apply_intent_model_to_state(state: Dict[str, Any], intent_model: Dict[str, Any]) -> Dict[str, Any]:
+    st = _coerce_analysis_state(state)
+    im = dict(intent_model or {})
+    action = str(im.get("action") or "")
+    entities = im.get("entities") if isinstance(im.get("entities"), dict) else {}
+    time_slot = im.get("time") if isinstance(im.get("time"), dict) else {}
+
+    # action -> analysis type 매핑
+    if action in {"BREAKDOWN", "TREND", "SEGMENT", "DIAGNOSE"} and st.get("analysis_type") == "summary":
+        st["analysis_type"] = "acquisition"
+    if action == "COMPARE":
+        st["comparison"] = True
+        st["execution_mode"] = "comparison"
+    elif action:
+        st["comparison"] = False
+        st["execution_mode"] = "single"
+        st["period"]["previous"] = None
+
+    # entities 반영
+    metrics = entities.get("metrics") if isinstance(entities.get("metrics"), list) else []
+    dims = entities.get("dimensions") if isinstance(entities.get("dimensions"), list) else []
+    if metrics:
+        st["metrics"] = _metric_swap_from_question(
+            question=" ".join([action] + metrics),
+            current_metrics=_dedupe_metrics(metrics + (st.get("metrics") or [])),
+            metric_append=True,
+        )
+    if dims:
+        st["dimensions"] = [str(dims[0])]
+
+    # time 반영
+    mode = str(time_slot.get("mode") or "KEEP_STATE")
+    ts = str(time_slot.get("start") or "")
+    te = str(time_slot.get("end") or "")
+    if mode != "KEEP_STATE" and ts and te:
+        st["period"]["current"] = f"{ts} ~ {te}"
+        st["period"]["symbol"] = None
+        if st.get("comparison"):
+            st["period"]["previous"] = _previous_period_range(st["period"]["current"])
+
+    st["metrics"] = _dedupe_metrics(st.get("metrics") or ["activeUsers"])
     return st
 
 
@@ -2843,9 +3239,14 @@ def ensure_new_conversation():
         "pending_source_choice",
         "pending_file_switch",
         "pending_clarify",
+        "pending_intent_clarify",
+        "pending_intent_source_choice",
+        "forced_source_once",
         "last_followup_suggestions",
         "last_user_question",
         "last_response",
+        "last_intent_model",
+        "current_intent_model",
         "current_analysis_state",
         "current_ga_plan_state",
     ]:
@@ -4060,17 +4461,117 @@ def ask_question():
             session['conversation_id'] = str(uuid.uuid4())
             conversation_id = session['conversation_id']
 
+        property_id = session.get("property_id")
+        # 파일 경로 세션 연동 (전처리 우선)
+        file_path = session.get("preprocessed_data_path") or session.get("uploaded_file_path")
+
         # 상태 단일 소스: DB에서 로드하고 session은 캐시로만 사용
         analysis_state = _load_analysis_state_from_db(conversation_id)
         session["current_analysis_state"] = analysis_state
+
+        # 1-turn intent clarification (선택 안 하면 즉시 만료)
+        pending_intent_clarify = session.pop("pending_intent_clarify", None)
+        if isinstance(pending_intent_clarify, dict):
+            options = pending_intent_clarify.get("options") or []
+            picked_idx = _resolve_choice_index(original_question, options)
+            if 0 <= picked_idx < len(options):
+                base_q = str(pending_intent_clarify.get("base_question") or "").strip()
+                original_question = f"{base_q} {options[picked_idx]}".strip() if base_q else str(options[picked_idx]).strip()
+
+        # 1-turn source clarification (선택 안 하면 즉시 만료)
+        pending_intent_source = session.pop("pending_intent_source_choice", None)
+        if isinstance(pending_intent_source, dict):
+            options = pending_intent_source.get("options") or []
+            sources = pending_intent_source.get("sources") or []
+            picked_idx = _resolve_choice_index(original_question, options)
+            if 0 <= picked_idx < len(options) and picked_idx < len(sources):
+                chosen_source = str(sources[picked_idx] or "").upper()
+                if chosen_source in {"GA4", "FILE", "MIXED"}:
+                    session["forced_source_once"] = chosen_source.lower()
+                base_q = str(pending_intent_source.get("base_question") or "").strip()
+                original_question = base_q or original_question
+
+        prev_context = DBManager.load_conversation_context(conversation_id) or {}
+        prev_source = str(prev_context.get("active_source") or "")
+        has_ga = bool(property_id)
+        has_file = bool(file_path)
+
+        intent_model = _build_intent_model(
+            question=original_question,
+            state=analysis_state,
+            has_ga=has_ga,
+            has_file=has_file,
+            prev_source=prev_source,
+        )
+        session["current_intent_model"] = intent_model
+
+        # source 결정이 ASK이고 다중 소스가 실제로 있으면 1턴 선택형 확인(옵션 2개)
+        intent_source = str(intent_model.get("source") or "ASK").upper()
+        if intent_source == "ASK":
+            src_options: List[str] = []
+            src_values: List[str] = []
+            if has_ga:
+                src_options.append("GA4")
+                src_values.append("GA4")
+            if has_file:
+                src_options.append("파일")
+                src_values.append("FILE")
+            if len(src_options) >= 2:
+                src_options = src_options[:2]
+                src_values = src_values[:2]
+                session["pending_intent_source_choice"] = {
+                    "base_question": original_question,
+                    "options": src_options,
+                    "sources": src_values,
+                }
+                return jsonify({
+                    "response": {
+                        "message": "어떤 데이터 소스로 분석할까요?",
+                        "status": "clarify",
+                        "options": src_options,
+                        "followup_suggestions": src_options,
+                        "plot_data": []
+                    },
+                    "route": "system",
+                    "intent_model": intent_model
+                })
+            if len(src_values) == 1:
+                session["forced_source_once"] = str(src_values[0]).lower()
+        elif intent_source in {"GA4", "FILE", "MIXED"}:
+            session["forced_source_once"] = intent_source.lower()
+
+        # intent 기반 clarification은 선택형 2개, 1턴만 허용
+        if bool(intent_model.get("needs_clarification")):
+            clarify_q = str(intent_model.get("clarification_question") or "").strip()
+            clarify_opts = [str(x).strip() for x in (intent_model.get("clarification_options") or []) if str(x).strip()][:2]
+            if clarify_q and clarify_opts:
+                session["pending_intent_clarify"] = {
+                    "base_question": original_question,
+                    "options": clarify_opts,
+                }
+                return jsonify({
+                    "response": {
+                        "message": clarify_q,
+                        "status": "clarify",
+                        "options": clarify_opts,
+                        "followup_suggestions": clarify_opts,
+                        "plot_data": []
+                    },
+                    "route": "system",
+                    "intent_model": intent_model
+                })
+
+        likely_ga_question = False
         if original_question and not _is_general_chat_text(original_question):
             likely_ga_question = (
                 _is_likely_ga_data_question(original_question)
                 or _is_expansion_request(original_question)
                 or _detect_correction_signal(original_question)
+                or intent_source in {"GA4", "MIXED"}
             )
             if likely_ga_question:
                 analysis_state = _build_state_from_scratch(original_question, analysis_state)
+                analysis_state = _apply_intent_model_to_state(analysis_state, intent_model)
                 session["current_analysis_state"] = analysis_state
                 _save_analysis_state_to_db(conversation_id, analysis_state)
 
@@ -4081,7 +4582,7 @@ def ask_question():
             if _is_expansion_request(original_question) or any(k in ql_tmp for k in ["원인", "이유", "왜", "더 내려", "세분", "드릴다운", "drill down", "drilldown"]):
                 prev_user_q = _build_anchor_query_from_state(current_state)
         question = _merge_with_previous_query(original_question, prev_user_q)
-        if _is_likely_ga_data_question(original_question):
+        if likely_ga_question and property_id:
             question = _build_query_from_analysis_state(original_question, analysis_state)
         question = _normalize_summary_request(question)
         beginner_mode = bool(data.get("beginner_mode", False))
@@ -4111,14 +4612,21 @@ def ask_question():
                     "plot_data": [],
                     "followup_suggestions": ["지난주 요약 알려줘", "지난주 사용자 수 알려줘", "채널별 사용자 수 알려줘"]
                 },
-                "route": "system"
+                "route": "system",
+                "intent_model": intent_model
             })
 
         # 추천 질문 번호 선택 지원 (예: "1번", "2")
         is_followup_selected = False
         selected_followup_text = None
         # 단, 소스 선택/파일 전환 확인 대기 중에는 번호를 followup으로 치환하지 않는다.
-        has_pending_choice = bool(session.get("pending_source_choice") or session.get("pending_file_switch") or session.get("pending_clarify"))
+        has_pending_choice = bool(
+            session.get("pending_source_choice")
+            or session.get("pending_file_switch")
+            or session.get("pending_clarify")
+            or session.get("pending_intent_clarify")
+            or session.get("pending_intent_source_choice")
+        )
         if not has_pending_choice:
             m = re.match(r"^\s*(\d+)\s*번?\s*$", question)
             if m:
@@ -4143,10 +4651,6 @@ def ask_question():
             if _is_likely_ga_data_question(selected_followup_text):
                 question = _build_query_from_analysis_state(selected_followup_text, analysis_state)
 
-        property_id = session.get("property_id")
-        # 🔥 파일 경로 세션 연동 (전처리 우선)
-        file_path = session.get("preprocessed_data_path") or session.get("uploaded_file_path")
-        
         # 요약 질의는 일반 파서 실패를 줄이기 위해 시작점에서 전용 경로 우선 처리
         response = None
         if _is_summary_request(original_question) and _is_likely_ga_data_question(original_question) and property_id:
@@ -4189,6 +4693,13 @@ def ask_question():
         if _is_negative_feedback_text(question):
             prev_question = session.get("last_user_question")
             prev_response = session.get("last_response")
+            prev_intent = session.get("last_intent_model")
+            feedback_payload = str(question or "")
+            try:
+                if isinstance(prev_intent, dict) and prev_intent:
+                    feedback_payload = f"{feedback_payload}\nintent_model={json.dumps(prev_intent, ensure_ascii=False)}"
+            except Exception:
+                pass
             DBManager.mark_last_interaction_bad(
                 conversation_id=conversation_id,
                 note=f"auto_feedback: {question}"
@@ -4196,7 +4707,7 @@ def ask_question():
             DBManager.log_failure_feedback(
                 user_id=user_id,
                 conversation_id=conversation_id,
-                feedback_text=question,
+                feedback_text=feedback_payload,
                 target_question=prev_question,
                 target_response=prev_response
             )
@@ -4491,6 +5002,7 @@ def ask_question():
         # 다음 피드백 연결을 위해 직전 질의/응답 저장
         session["last_user_question"] = original_question
         session["last_response"] = response
+        session["last_intent_model"] = intent_model
 
         # [P0] Sanitize Response (NaN -> None)
         sanitized_response = sanitize(response)
@@ -4516,6 +5028,7 @@ def ask_question():
             pass
         if isinstance(sanitized_response, dict):
             sanitized_response["interaction_id"] = interaction_id
+            sanitized_response["intent_model"] = intent_model
         return jsonify(sanitized_response)
 
     except Exception as e:
